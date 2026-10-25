@@ -43,14 +43,37 @@ import {
   type GuildConfig,
 } from "./db.js";
 
-const COLORS = { steel: 0x5d6470, gold: 0xa78648, green: 0x667c57, red: 0x8a4a42 };
+const COLORS = {
+  midnight: 0x111827,
+  steel: 0x475569,
+  gold: 0xc49a4a,
+  green: 0x4f8a62,
+  red: 0xa34f4f,
+  blue: 0x477fae,
+};
+const ICONS = {
+  crown: "♛",
+  sword: "⚔️",
+  scroll: "📜",
+  coin: "🪙",
+  compass: "🧭",
+  shield: "🛡️",
+  hammer: "🔨",
+  book: "📖",
+  people: "👥",
+  check: "✅",
+  clock: "⏳",
+  lock: "🔒",
+};
+// Override this with PANEL_BANNER_URL in Render if you replace the artwork later.
+const PANEL_BANNER_URL = process.env.PANEL_BANNER_URL ?? "https://files.manuscdn.com/user_upload_by_module/session_file/310519663954740263/lSRWcVrLiNCANlcG.png";
 const STATUS_LABELS: Record<ContractStatus, string> = {
-  available: "Disponível",
-  accepted: "Aceito",
-  in_progress: "Em andamento",
-  completed: "Concluído",
-  cancelled: "Cancelado",
-  archived: "Arquivado",
+  available: "🟢 Disponível",
+  accepted: "🔵 Aceito",
+  in_progress: "🟡 Em andamento",
+  completed: "✅ Concluído",
+  cancelled: "🔴 Cancelado",
+  archived: "📦 Arquivado",
 };
 
 const statusOptions = Object.entries(STATUS_LABELS).map(([value, label]) => ({
@@ -127,29 +150,31 @@ function input(customId: string, label: string, style: TextInputStyle, required 
 function panelEmbed(config: GuildConfig): EmbedBuilder {
   return new EmbedBuilder()
     .setColor(COLORS.gold)
-    .setTitle(config.texts.panelTitle)
-    .setDescription(`${config.texts.panelDescription}\n\nAções administrativas ficam registradas no banco da Companhia.`)
+    .setTitle(`${ICONS.crown}  ${config.texts.panelTitle}`)
+    .setDescription(`> ${config.texts.panelDescription}\n\n**Livro de comando da Companhia**\nUse os controles abaixo para registrar missões, organizar a equipe e manter o caixa em ordem. Todas as ações administrativas ficam registradas no histórico.`)
     .addFields(
-      { name: "Estrutura", value: "Criar ou atualizar categorias, salas e a sala privada do painel.", inline: false },
-      { name: "Autoridade", value: `Administradores: ${config.adminRoleIds.length || "a definir"}\nGerentes: ${config.managerRoleIds.length || "a definir"}`, inline: true },
-      { name: "Moeda", value: config.currency, inline: true },
-      { name: "Contratos", value: "Criação, equipe, estados, tópicos e pagamento.", inline: false },
+      { name: `${ICONS.hammer} Estrutura`, value: "Categorias, canais e permissões da guilda.", inline: true },
+      { name: `${ICONS.shield} Autoridade`, value: `Admins: **${config.adminRoleIds.length || "a definir"}**\nGerentes: **${config.managerRoleIds.length || "a definir"}**`, inline: true },
+      { name: `${ICONS.coin} Tesouraria`, value: `Unidade: **${config.currency}**`, inline: true },
+      { name: `${ICONS.scroll} Quadro de missões`, value: "Abra contratos, forme equipes, mova estados e lance pagamentos sem sair do Discord.", inline: false },
     )
-    .setFooter({ text: "Companhia de Mercenários" });
+    .setImage(PANEL_BANNER_URL)
+    .setFooter({ text: "COMPANHIA DE MERCENÁRIOS  •  O registro permanece" })
+    .setTimestamp();
 }
 
 function panelComponents(): ActionRowBuilder<ButtonBuilder>[] {
   return [
     new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId("panel:structure").setLabel("Criar estrutura").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId("panel:roles").setLabel("Definir cargos").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId("panel:texts").setLabel("Textos").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId("panel:refresh").setLabel("Atualizar painel").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("panel:new-contract").setLabel("Novo contrato").setEmoji(ICONS.scroll).setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId("panel:contracts").setLabel("Quadro de missões").setEmoji(ICONS.sword).setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("panel:payments").setLabel("Livro-caixa").setEmoji(ICONS.coin).setStyle(ButtonStyle.Secondary),
     ),
     new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId("panel:new-contract").setLabel("Novo contrato").setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId("panel:contracts").setLabel("Consultar contratos").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId("panel:payments").setLabel("Pagamentos").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("panel:structure").setLabel("Sincronizar estrutura").setEmoji(ICONS.hammer).setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("panel:roles").setLabel("Cargos autorizados").setEmoji(ICONS.shield).setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("panel:texts").setLabel("Identidade da guilda").setEmoji("✒️").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("panel:refresh").setLabel("Recarregar").setEmoji("🔄").setStyle(ButtonStyle.Secondary),
     ),
   ];
 }
@@ -218,18 +243,21 @@ async function upsertPanelMessage(channel: Extract<Channel, { type: ChannelType.
 
 function contractEmbed(contract: Contract, participantText = "Nenhum participante registrado."): EmbedBuilder {
   return new EmbedBuilder()
-    .setColor(contract.status === "completed" ? COLORS.green : contract.status === "cancelled" ? COLORS.red : COLORS.steel)
-    .setTitle(`${contract.code} — ${contract.title}`)
-    .setDescription(contract.description)
+    .setColor(contract.status === "completed" ? COLORS.green : contract.status === "cancelled" ? COLORS.red : contract.status === "in_progress" ? COLORS.gold : COLORS.steel)
+    .setAuthor({ name: `${ICONS.sword}  CONTRATO DA COMPANHIA` })
+    .setTitle(`${contract.code}  •  ${contract.title}`)
+    .setDescription(`> ${contract.description}`)
     .addFields(
-      { name: "Contratante", value: contract.client, inline: true },
-      { name: "Local", value: contract.location || "Não informado", inline: true },
-      { name: "Valor", value: money(contract.totalValue), inline: true },
-      { name: "Estado", value: STATUS_LABELS[contract.status], inline: true },
-      { name: "Pagamento", value: contract.paymentStatus === "paid" ? "Lançado" : "Pendente", inline: true },
-      { name: "Participantes", value: participantText, inline: false },
+      { name: "👤 Contratante", value: contract.client, inline: true },
+      { name: `${ICONS.compass} Local`, value: contract.location || "Não informado", inline: true },
+      { name: `${ICONS.coin} Recompensa`, value: `**${money(contract.totalValue)}**`, inline: true },
+      { name: "📌 Situação", value: STATUS_LABELS[contract.status], inline: true },
+      { name: "💰 Pagamento", value: contract.paymentStatus === "paid" ? `${ICONS.check} Lançado` : `${ICONS.clock} Pendente`, inline: true },
+      { name: `${ICONS.people} Equipe`, value: participantText, inline: false },
     )
-    .setFooter({ text: "Registro da Companhia" });
+    .setThumbnail(PANEL_BANNER_URL)
+    .setFooter({ text: `Registro da Companhia  •  ${contract.code}` })
+    .setTimestamp(contract.createdAt);
 }
 
 const statusChannelKeys: Record<ContractStatus, string> = {
@@ -256,17 +284,17 @@ async function contractDetail(interaction: ButtonInteraction, id: number): Promi
     : "Nenhum participante registrado.";
   const rows: ActionRowBuilder<ButtonBuilder | UserSelectMenuBuilder | StringSelectMenuBuilder>[] = [
     new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-      new StringSelectMenuBuilder().setCustomId(`contract:status:${id}`).setPlaceholder("Alterar estado").addOptions(statusOptions),
+      new StringSelectMenuBuilder().setCustomId(`contract:status:${id}`).setPlaceholder("📌 Alterar situação da missão").addOptions(statusOptions),
     ),
     new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(
-      new UserSelectMenuBuilder().setCustomId(`contract:participants:${id}`).setPlaceholder("Adicionar participantes").setMinValues(1).setMaxValues(10),
+      new UserSelectMenuBuilder().setCustomId(`contract:participants:${id}`).setPlaceholder("👥 Montar equipe da missão").setMinValues(1).setMaxValues(10),
     ),
   ];
   const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
     ...(contract.status === "completed" && contract.paymentStatus === "pending"
-      ? [new ButtonBuilder().setCustomId(`contract:pay:${id}`).setLabel("Registrar pagamento").setStyle(ButtonStyle.Success)]
+      ? [new ButtonBuilder().setCustomId(`contract:pay:${id}`).setLabel("Lançar pagamento").setEmoji(ICONS.coin).setStyle(ButtonStyle.Success)]
       : []),
-    new ButtonBuilder().setCustomId(`contract:archive:${id}`).setLabel("Arquivar").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`contract:archive:${id}`).setLabel("Arquivar registro").setEmoji("📦").setStyle(ButtonStyle.Secondary),
   );
   rows.push(buttons);
   await interaction.reply({ embeds: [contractEmbed(contract, participantText)], components: rows, ephemeral: true });
@@ -274,31 +302,52 @@ async function contractDetail(interaction: ButtonInteraction, id: number): Promi
 
 async function contractsMenu(interaction: ButtonInteraction | ChatInputCommandInteraction): Promise<void> {
   const menu = new StringSelectMenuBuilder().setCustomId("contracts:status").setPlaceholder("Filtrar contratos por estado").addOptions([
-    { label: "Todos", value: "all", description: "Mostrar o histórico completo" },
+    { label: "📚 Todos os contratos", value: "all", description: "Mostrar o histórico completo" },
     ...statusOptions,
   ]);
   const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
-  await interaction.reply({ content: "Escolha o quadro que deseja consultar.", components: [row], ephemeral: true });
+  await interaction.reply({ content: `${ICONS.book} **Quadro de missões**\nEscolha uma situação para consultar os contratos registrados.`, components: [row], ephemeral: true });
 }
 
 async function showContractList(interaction: StringSelectMenuInteraction, value: string): Promise<unknown> {
   const status = value === "all" ? undefined : value as ContractStatus;
   const contracts = await listContracts(interaction.guildId!, status);
   if (!contracts.length) return interaction.update({ content: "Nenhum contrato encontrado para esse filtro.", components: [], embeds: [] });
-  const lines = contracts.slice(0, 15).map((contract) => `${contract.code} — **${contract.title}** — ${STATUS_LABELS[contract.status]} — ${money(contract.totalValue)}`);
+  const lines = contracts.slice(0, 15).map((contract) => `${STATUS_LABELS[contract.status]}  **${contract.code}** — ${contract.title}\n> ${money(contract.totalValue)}  •  pagamento: ${contract.paymentStatus === "paid" ? "lançado" : "pendente"}`);
   const buttons = new ActionRowBuilder<ButtonBuilder>();
   for (const contract of contracts.slice(0, 5)) buttons.addComponents(new ButtonBuilder().setCustomId(`contract:view:${contract.id}`).setLabel(contract.code).setStyle(ButtonStyle.Secondary));
-  await interaction.update({ content: `Contratos registrados${status ? ` — ${STATUS_LABELS[status]}` : ""}:\n\n${lines.join("\n")}${contracts.length > 15 ? "\n\nExibindo os 15 mais recentes." : ""}`, components: buttons.components.length ? [buttons] : [] });
+  await interaction.update({ content: `${ICONS.book} **Contratos registrados${status ? ` — ${STATUS_LABELS[status]}` : ""}**\n\n${lines.join("\n\n")}${contracts.length > 15 ? "\n\n_Exibindo os 15 mais recentes._" : ""}`, components: buttons.components.length ? [buttons] : [] });
 }
 
-async function newContractModal(interaction: ButtonInteraction): Promise<void> {
-  const modal = new ModalBuilder().setCustomId("contract:create").setTitle("Registrar contrato");
+async function paymentLedger(interaction: ButtonInteraction | ChatInputCommandInteraction): Promise<void> {
+  const contracts = (await listContracts(interaction.guildId!)).filter((contract) => contract.paymentStatus === "paid");
+  if (!contracts.length) {
+    await interaction.reply({ content: `${ICONS.coin} **Livro-caixa vazio**\nAinda não há pagamentos registrados para esta guilda.`, ephemeral: true });
+    return;
+  }
+  const lines: string[] = [];
+  for (const contract of contracts.slice(0, 15)) {
+    const payment = await getPayment(interaction.guildId!, contract.id);
+    lines.push(`**${contract.code}**  ${contract.title}\n> ${ICONS.coin} ${money(payment?.totalAmount ?? contract.totalValue)}  •  ${payment?.items.length ?? 0} participante(s)`);
+  }
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.gold)
+    .setAuthor({ name: `${ICONS.coin}  LIVRO-CAIXA DA COMPANHIA` })
+    .setDescription("Pagamentos lançados e registrados no histórico financeiro.")
+    .addFields({ name: "Lançamentos recentes", value: lines.join("\n\n") })
+    .setFooter({ text: contracts.length > 15 ? "Exibindo os 15 lançamentos mais recentes" : "Histórico financeiro auditável" })
+    .setTimestamp();
+  await interaction.reply({ embeds: [embed], ephemeral: true });
+}
+
+async function newContractModal(interaction: ButtonInteraction | ChatInputCommandInteraction): Promise<void> {
+  const modal = new ModalBuilder().setCustomId("contract:create").setTitle("⚔️ Novo contrato");
   modal.addComponents(
-    new ActionRowBuilder<TextInputBuilder>().addComponents(input("title", "Título do contrato", TextInputStyle.Short, true, 150)),
-    new ActionRowBuilder<TextInputBuilder>().addComponents(input("client", "Contratante", TextInputStyle.Short, true, 150)),
-    new ActionRowBuilder<TextInputBuilder>().addComponents(input("value", "Valor em septims", TextInputStyle.Short, true, 30)),
-    new ActionRowBuilder<TextInputBuilder>().addComponents(input("location", "Local", TextInputStyle.Short, true, 150)),
-    new ActionRowBuilder<TextInputBuilder>().addComponents(input("description", "Descrição da missão", TextInputStyle.Paragraph, true, 1000)),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(input("title", "Nome da missão", TextInputStyle.Short, true, 150).setPlaceholder("Ex.: Escolta até Dawnstar")),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(input("client", "Nome do contratante", TextInputStyle.Short, true, 150).setPlaceholder("Ex.: Jarl de Whiterun")),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(input("value", "Recompensa em septims", TextInputStyle.Short, true, 30).setPlaceholder("Ex.: 1.500,00")),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(input("location", "Local da missão", TextInputStyle.Short, true, 150).setPlaceholder("Ex.: Estrada de Helgen")),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(input("description", "Briefing da missão", TextInputStyle.Paragraph, true, 1000).setPlaceholder("Objetivo, riscos e condições do contrato...")),
   );
   await interaction.showModal(modal);
 }
@@ -450,14 +499,7 @@ async function handleButton(interaction: ButtonInteraction): Promise<unknown> {
   }
   if (interaction.customId === "panel:payments") {
     if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem consultar pagamentos.", ephemeral: true });
-    const paid = (await listContracts(interaction.guildId!)).filter((contract) => contract.paymentStatus === "paid");
-    if (!paid.length) return interaction.reply({ content: "Ainda não há pagamentos registrados.", ephemeral: true });
-    const lines = [];
-    for (const contract of paid.slice(0, 15)) {
-      const payment = await getPayment(interaction.guildId!, contract.id);
-      lines.push(`${contract.code} — ${contract.title} — ${money(payment?.totalAmount ?? contract.totalValue)} — ${payment?.items.length ?? 0} participante(s)`);
-    }
-    return interaction.reply({ content: `Histórico de pagamentos:\n\n${lines.join("\n")}`, ephemeral: true });
+    return paymentLedger(interaction);
   }
   if (interaction.customId.startsWith("contract:view:")) return contractDetail(interaction, Number(interaction.customId.split(":")[2]));
   if (interaction.customId.startsWith("contract:pay:")) {
@@ -501,24 +543,50 @@ async function handleSelect(interaction: StringSelectMenuInteraction | UserSelec
 }
 
 async function handleCommand(interaction: ChatInputCommandInteraction): Promise<unknown> {
-  if (interaction.commandName !== "painel") return;
-  if (!hasAdministrator(interaction) && !(await canAdmin(interaction))) return interaction.reply({ content: "Apenas o proprietário, Administrator ou administradores configurados podem abrir o painel.", ephemeral: true });
-  await interaction.deferReply({ ephemeral: true });
-  try {
+  if (interaction.commandName === "painel") {
+    if (!hasAdministrator(interaction) && !(await canAdmin(interaction))) return interaction.reply({ content: `${ICONS.lock} Apenas o proprietário, Administrator ou administradores configurados podem abrir o painel.`, ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      const config = await provisionGuildStructure(interaction.guild!);
+      await interaction.editReply({ content: `${ICONS.check} **Painel da Companhia pronto.**\nSala privada: <#${config.channelIds["painel-configuracao"]}>\n\nUse os botões para comandar a operação.` });
+    } catch (error) {
+      await interaction.editReply(error instanceof Error ? error.message : "Não foi possível inicializar o painel.");
+    }
+    return;
+  }
+  if (interaction.commandName === "contratos") {
+    if (!(await canManage(interaction))) return interaction.reply({ content: `${ICONS.lock} Apenas gerentes e administradores podem consultar contratos.`, ephemeral: true });
+    return contractsMenu(interaction);
+  }
+  if (interaction.commandName === "novo-contrato") {
+    if (!(await canManage(interaction))) return interaction.reply({ content: `${ICONS.lock} Apenas gerentes e administradores podem criar contratos.`, ephemeral: true });
+    return newContractModal(interaction);
+  }
+  if (interaction.commandName === "pagamentos") {
+    if (!(await canManage(interaction))) return interaction.reply({ content: `${ICONS.lock} Apenas gerentes e administradores podem consultar pagamentos.`, ephemeral: true });
+    return paymentLedger(interaction);
+  }
+  if (interaction.commandName === "estrutura") {
+    if (!(await canAdmin(interaction))) return interaction.reply({ content: `${ICONS.lock} Apenas administradores autorizados podem sincronizar a estrutura.`, ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
     const config = await provisionGuildStructure(interaction.guild!);
-    await interaction.editReply(`Painel pronto em <#${config.channelIds["painel-configuracao"]}>. Acesse a sala privada para operar a Companhia.`);
-  } catch (error) {
-    await interaction.editReply(error instanceof Error ? error.message : "Não foi possível inicializar o painel.");
+    return interaction.editReply(`${ICONS.check} Estrutura sincronizada. Painel privado: <#${config.channelIds["painel-configuracao"]}>`);
   }
 }
 
 export async function registerDiscord(client: Client): Promise<void> {
-  const command = { name: "painel", description: "Abrir o painel da Companhia de Mercenários" };
+  const commands = [
+    { name: "painel", description: "Abrir o painel da Companhia de Mercenários" },
+    { name: "contratos", description: "Consultar o quadro de missões e contratos" },
+    { name: "novo-contrato", description: "Registrar uma nova missão no livro da Companhia" },
+    { name: "pagamentos", description: "Consultar o livro-caixa e pagamentos lançados" },
+    { name: "estrutura", description: "Sincronizar categorias, canais e painel privado" },
+  ];
   const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN ?? "");
   if (process.env.DISCORD_GUILD_ID) {
-    await rest.put(Routes.applicationGuildCommands(client.user!.id, process.env.DISCORD_GUILD_ID), { body: [command] });
+    await rest.put(Routes.applicationGuildCommands(client.user!.id, process.env.DISCORD_GUILD_ID), { body: commands });
   } else {
-    await rest.put(Routes.applicationCommands(client.user!.id), { body: [command] });
+    await rest.put(Routes.applicationCommands(client.user!.id), { body: commands });
   }
 }
 
