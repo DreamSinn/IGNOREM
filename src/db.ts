@@ -100,12 +100,21 @@ function getPool(): Pool {
   if (pool) return pool;
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL não configurada.");
+  const parsed = new URL(url);
+  const caPath = process.env.DATABASE_CA_PATH;
   pool = mysql.createPool({
-    uri: url,
+    host: parsed.hostname,
+    port: Number(parsed.port || 4000),
+    user: decodeURIComponent(parsed.username),
+    password: decodeURIComponent(parsed.password),
+    database: parsed.pathname.replace(/^\//, "") || "test",
     connectionLimit: 5,
     waitForConnections: true,
     queueLimit: 0,
     timezone: "Z",
+    ssl: caPath
+      ? { ca: readFileSync(caPath), rejectUnauthorized: true }
+      : { rejectUnauthorized: false },
   });
   return pool;
 }
