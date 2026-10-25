@@ -1,11 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import mysql, {
-  type Pool,
-  type ResultSetHeader,
-  type RowDataPacket,
-} from "mysql2/promise";
-
+import mysql, { type Pool, type ResultSetHeader, type RowDataPacket } from "mysql2/promise";
 
 export type ContractStatus =
   | "available"
@@ -74,7 +69,27 @@ export interface Payment {
   paidBy: string;
   note: string;
   paidAt: Date;
+  guildShare: number;
+  distributedAmount: number;
   items: PaymentItem[];
+}
+
+export interface ContractApplicant {
+  id: number;
+  contractId: number;
+  guildId: string;
+  userId: string;
+  displayName: string;
+  status: "pending" | "approved" | "rejected";
+  createdAt: Date;
+}
+
+export interface GuildFinance {
+  guildId: string;
+  sharePercent: number;
+  balance: number;
+  totalIncome: number;
+  totalExpenses: number;
 }
 
 type DbRow = RowDataPacket & Record<string, unknown>;
@@ -83,39 +98,17 @@ let pool: Pool | null = null;
 
 function getPool(): Pool {
   if (pool) return pool;
-
   const url = process.env.DATABASE_URL;
-
-  if (!url) {
-    throw new Error("DATABASE_URL não configurada.");
-  }
-
-  const caPath = process.env.DATABASE_CA_PATH;
-  const parsed = new URL(url);
-
+  if (!url) throw new Error("DATABASE_URL não configurada.");
   pool = mysql.createPool({
-    host: parsed.hostname,
-    port: Number(parsed.port || 4000),
-    user: decodeURIComponent(parsed.username),
-    password: decodeURIComponent(parsed.password),
-    database: parsed.pathname.replace(/^\//, "") || "test",
+    uri: url,
     connectionLimit: 5,
     waitForConnections: true,
     queueLimit: 0,
     timezone: "Z",
-    ssl: caPath
-      ? {
-          ca: readFileSync(caPath),
-          rejectUnauthorized: true,
-        }
-      : {
-          rejectUnauthorized: false,
-        },
   });
-
   return pool;
 }
-
 
 const defaultTexts: Record<string, string> = {
   panelTitle: "Painel da Companhia",
@@ -271,6 +264,68 @@ export async function setGuildTexts(guildId: string, texts: Record<string, strin
   return saveGuildConfig(config);
 }
 
+export async function ensureGuildFinance(guildId: string): Promise<void> {
+  await getPool().execute(
+    `INSERT INTO guild_finance (guild_id, share_percent, balance)
+     VALUES (?, 10.00, 0.00)
+     ON DUPLICATE KEY UPDATE guild_id = VALUES(guild_id)`,
+    [guildId],
+  );
+}
+
+export async function getGuildFinance(guildId: string): Promise<GuildFinance> {
+  await ensureGuildFinance(guildId);
+  const [rows] = await getPool().execute<DbRow[]>("SELECT * FROM guild_finance WHERE guild_id = ? LIMIT 1", [guildId]);
+  const [incomeRows] = await getPool().execute<DbRow[]>("SELECT COALESCE(SUM(amount), 0) AS total FROM guild_ledger WHERE guild_id = ? AND kind = 'income'", [guildId]);
+  const [expenseRows] = await getPool().execute<DbRow[]>("SELECT COALESCE(SUM(amount), 0) AS total FROM guild_ledger WHERE guild_id = ? AND kind = 'expense'", [guildId]);
+  const row = rows[0];
+  return { guildId, sharePercent: Number(row.share_percent), balance: Number(row.balance), totalIncome: Number(incomeRows[0]?.total ?? 0), totalExpenses: Number(expenseRows[0]?.total ?? 0) };
+}
+
+export async function recordGuildExpense(input: { guildId: string; amount: number; description: string; createdBy: string }): Promise<GuildFinance> {
+  if (!Number.isFinite(input.amount) || input.amount <= 0) throw new Error("A despesa precisa ser maior que zero.");
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    const [financeRows] = await connection.execute<DbRow[]>("SELECT * FROM guild_finance WHERE guild_id = ? FOR UPDATE", [input.guildId]);
+    if (!financeRows[0]) throw new Error("Caixa da guilda ainda não foi inicializado.");
+    if (Number(financeRows[0].balance) < input.amount) throw new Error(`Saldo insuficiente. Disponível: ${Number(financeRows[0].balance).toFixed(2)} septims.`);
+    await connection.execute("UPDATE guild_finance SET balance = balance - ? WHERE guild_id = ?", [input.amount.toFixed(2), input.guildId]);
+    await connection.execute("INSERT INTO guild_ledger (guild_id, kind, amount, description, created_by) VALUES (?, 'expense', ?, ?, ?)", [input.guildId, input.amount.toFixed(2), input.description, input.createdBy]);
+    await connection.commit();
+    return getGuildFinance(input.guildId);
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+export async function applyForContract(input: { guildId: string; contractId: number; userId: string; displayName: string }): Promise<ContractApplicant> {
+  const contract = await getContract(input.guildId, input.contractId);
+  if (!contract) throw new Error("Contrato não encontrado.");
+  if (contract.status !== "available") throw new Error("As inscrições para este contrato estão encerradas.");
+  await getPool().execute(`INSERT INTO contract_applicants (contract_id, guild_id, user_id, display_name, status) VALUES (?, ?, ?, ?, 'pending') ON DUPLICATE KEY UPDATE display_name = VALUES(display_name), status = 'pending'`, [input.contractId, input.guildId, input.userId, input.displayName]);
+  const [rows] = await getPool().execute<DbRow[]>("SELECT * FROM contract_applicants WHERE guild_id = ? AND contract_id = ? AND user_id = ? LIMIT 1", [input.guildId, input.contractId, input.userId]);
+  return toApplicant(rows[0]);
+}
+
+function toApplicant(row: DbRow): ContractApplicant {
+  return { id: Number(row.id), contractId: Number(row.contract_id), guildId: String(row.guild_id), userId: String(row.user_id), displayName: String(row.display_name), status: String(row.status) as ContractApplicant["status"], createdAt: new Date(String(row.created_at)) };
+}
+
+export async function listApplicants(guildId: string, contractId: number): Promise<ContractApplicant[]> {
+  const [rows] = await getPool().execute<DbRow[]>("SELECT * FROM contract_applicants WHERE guild_id = ? AND contract_id = ? ORDER BY created_at ASC", [guildId, contractId]);
+  return rows.map(toApplicant);
+}
+
+export async function setApplicantStatus(guildId: string, applicantId: number, status: "approved" | "rejected"): Promise<ContractApplicant | null> {
+  await getPool().execute("UPDATE contract_applicants SET status = ? WHERE guild_id = ? AND id = ?", [status, guildId, applicantId]);
+  const [rows] = await getPool().execute<DbRow[]>("SELECT * FROM contract_applicants WHERE guild_id = ? AND id = ? LIMIT 1", [guildId, applicantId]);
+  return rows[0] ? toApplicant(rows[0]) : null;
+}
+
 export async function createContract(input: {
   guildId: string;
   title: string;
@@ -376,6 +431,7 @@ export async function recordPayment(input: {
   totalAmount?: number;
   note: string;
 }): Promise<Payment> {
+  await ensureGuildFinance(input.guildId);
   const connection = await getPool().getConnection();
   try {
     await connection.beginTransaction();
@@ -396,7 +452,11 @@ export async function recordPayment(input: {
 
     const total = Number(input.totalAmount ?? contract.totalValue);
     if (!Number.isFinite(total) || total <= 0) throw new Error("O valor do pagamento precisa ser maior que zero.");
-    const cents = Math.round(total * 100);
+    const [financeRows] = await connection.execute<DbRow[]>("SELECT * FROM guild_finance WHERE guild_id = ? FOR UPDATE", [input.guildId]);
+    const sharePercent = Number(financeRows[0]?.share_percent ?? 10);
+    const guildShare = Math.round(total * sharePercent) / 100;
+    const distributedAmount = Math.round((total - guildShare) * 100) / 100;
+    const cents = Math.round(distributedAmount * 100);
     const base = Math.floor(cents / participantRows.length);
     const remainder = cents - base * participantRows.length;
 
@@ -421,6 +481,8 @@ export async function recordPayment(input: {
       );
     }
     await connection.execute("UPDATE contracts SET payment_status = 'paid' WHERE guild_id = ? AND id = ?", [input.guildId, input.contractId]);
+    await connection.execute("UPDATE guild_finance SET balance = balance + ? WHERE guild_id = ?", [guildShare.toFixed(2), input.guildId]);
+    await connection.execute("INSERT INTO guild_ledger (guild_id, contract_id, kind, amount, description, created_by) VALUES (?, ?, 'income', ?, ?, ?)", [input.guildId, input.contractId, guildShare.toFixed(2), `Participação de ${contract.code}`, input.paidBy]);
     await connection.commit();
     return {
       id: paymentId,
@@ -430,6 +492,8 @@ export async function recordPayment(input: {
       paidBy: input.paidBy,
       note: input.note,
       paidAt: new Date(),
+      guildShare,
+      distributedAmount,
       items,
     };
   } catch (error) {
@@ -459,6 +523,8 @@ export async function getPayment(guildId: string, contractId: number): Promise<P
     paidBy: String(row.paid_by),
     note: String(row.note),
     paidAt: new Date(String(row.paid_at)),
+    guildShare: Number(row.total_amount) - itemRows.reduce((sum, item) => sum + Number(item.amount), 0),
+    distributedAmount: itemRows.reduce((sum, item) => sum + Number(item.amount), 0),
     items: itemRows.map((item) => ({
       userId: String(item.user_id),
       displayName: String(item.display_name),

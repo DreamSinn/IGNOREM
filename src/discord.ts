@@ -25,14 +25,20 @@ import {
 } from "discord.js";
 import {
   addParticipants,
+  applyForContract,
   createContract,
+  ensureGuildFinance,
   ensureGuildConfig,
   getContract,
   getGuildConfig,
+  getGuildFinance,
   getPayment,
   listParticipants,
+  listApplicants,
   listContracts,
   recordPayment,
+  recordGuildExpense,
+  setApplicantStatus,
   setContractStatus,
   setContractThread,
   setGuildRoles,
@@ -83,11 +89,13 @@ const statusOptions = Object.entries(STATUS_LABELS).map(([value, label]) => ({
 }));
 
 const categorySpecs = [
-  { key: "comando", name: "comando", channels: [{ key: "regras", name: "regras", type: "text" }, { key: "comunicados", name: "comunicados", type: "text" }, { key: "hierarquia", name: "hierarquia", type: "text" }, { key: "registro-membros", name: "registro-de-membros", type: "text" }] },
-  { key: "contratos", name: "contratos", channels: [{ key: "contratos-disponiveis", name: "contratos-disponiveis", type: "text" }, { key: "contratos-aceitos", name: "contratos-aceitos", type: "text" }, { key: "contratos-em-andamento", name: "contratos-em-andamento", type: "text" }, { key: "contratos-concluidos", name: "contratos-concluidos", type: "text" }, { key: "arquivo-contratos", name: "arquivo-de-contratos", type: "text" }] },
-  { key: "financas", name: "finanças", channels: [{ key: "pagamentos", name: "pagamentos", type: "text" }, { key: "historico-financeiro", name: "historico-financeiro", type: "text" }] },
-  { key: "operacoes", name: "operações", channels: [{ key: "planejamento", name: "planejamento", type: "text" }, { key: "relatorios-missao", name: "relatorios-de-missao", type: "text" }, { key: "provas-registros", name: "provas-e-registros", type: "text" }, { key: "briefing", name: "briefing", type: "voice" }, { key: "operacoes-voz", name: "operações", type: "voice" }, { key: "reuniao", name: "reunião", type: "voice" }, { key: "espera", name: "espera", type: "voice" }] },
-  { key: "configuracao", name: "configuração", channels: [{ key: "painel-configuracao", name: "painel-de-configuração", type: "text" }] },
+  { key: "companhia", name: "𝗖𝗢𝗠𝗣𝗔𝗡𝗛𝗜𝗔", channels: [
+    { key: "painel-configuracao", name: "🔒・𝗣𝗮𝗶𝗻𝗲𝗹", type: "text" },
+    { key: "contratos", name: "📜・𝗖𝗼𝗻𝘁𝗿𝗮𝘁𝗼𝘀", type: "text" },
+    { key: "chat-geral", name: "💬・𝗖𝗵𝗮𝘁-𝗚𝗲𝗿𝗮𝗹", type: "text" },
+    { key: "arquivo", name: "🗃️・𝗔𝗿𝗾𝘂𝗶𝘃𝗼", type: "text" },
+    { key: "caixa-guilda", name: "💰・𝗖𝗮𝗶𝘅𝗮-𝗱𝗮-𝗚𝘂𝗶𝗹𝗱𝗮", type: "text" },
+  ] },
 ] as const;
 
 function isTextChannel(channel: Channel | null | undefined): channel is Extract<Channel, { type: ChannelType.GuildText }> {
@@ -176,6 +184,10 @@ function panelComponents(): ActionRowBuilder<ButtonBuilder>[] {
       new ButtonBuilder().setCustomId("panel:texts").setLabel("Identidade da guilda").setEmoji("✒️").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId("panel:refresh").setLabel("Recarregar").setEmoji("🔄").setStyle(ButtonStyle.Secondary),
     ),
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId("panel:clear-chat").setLabel("Limpar chat atual").setEmoji("🧹").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("panel:wipe-server").setLabel("Apagar canais do servidor").setEmoji("⚠️").setStyle(ButtonStyle.Danger),
+    ),
   ];
 }
 
@@ -207,6 +219,41 @@ export async function syncPanelPermissions(guild: Guild, config: GuildConfig): P
   await panel.permissionOverwrites.set(overwrites, "Aplicar cargos autorizados ao painel");
 }
 
+async function syncOperationalPermissions(guild: Guild, config: GuildConfig): Promise<void> {
+  const adminIds = [...config.adminRoleIds, ...config.managerRoleIds];
+  const everyone = { id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] };
+  const bot = { id: guild.client.user?.id ?? "", allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks, PermissionFlagsBits.ManageMessages, PermissionFlagsBits.ManageThreads, PermissionFlagsBits.ReadMessageHistory] };
+  const readOnly = [everyone, bot, ...adminIds.map((id) => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] }))].filter((entry) => entry.id);
+  const caixa = guild.channels.cache.get(config.channelIds["caixa-guilda"]);
+  const arquivo = guild.channels.cache.get(config.channelIds.arquivo);
+  if (caixa && caixa.isTextBased() && "permissionOverwrites" in caixa) await caixa.permissionOverwrites.set([everyone, bot, ...adminIds.map((id) => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] }))].filter((entry) => entry.id), "Caixa somente leitura");
+  if (arquivo && arquivo.isTextBased() && "permissionOverwrites" in arquivo) await arquivo.permissionOverwrites.set(readOnly, "Arquivo somente leitura");
+}
+
+function financeEmbed(finance: Awaited<ReturnType<typeof getGuildFinance>>): EmbedBuilder {
+  return new EmbedBuilder()
+    .setColor(COLORS.gold)
+    .setAuthor({ name: "💰 𝗖𝗔𝗜𝗫𝗔 𝗗𝗔 𝗚𝗨𝗜𝗟𝗗𝗔" })
+    .setDescription("> Fundo coletivo da Companhia. Este canal é somente leitura.")
+    .addFields(
+      { name: "Saldo disponível", value: `**${money(finance.balance)}**`, inline: false },
+      { name: "Entradas acumuladas", value: money(finance.totalIncome), inline: true },
+      { name: "Despesas acumuladas", value: money(finance.totalExpenses), inline: true },
+      { name: "Participação por contrato", value: `${finance.sharePercent.toFixed(2)}%`, inline: true },
+    )
+    .setFooter({ text: "Atualizado automaticamente após cada lançamento" })
+    .setTimestamp();
+}
+
+async function upsertFinanceMessage(channel: Channel, guildId: string): Promise<void> {
+  if (!isTextChannel(channel)) return;
+  const finance = await getGuildFinance(guildId);
+  const recent = await channel.messages.fetch({ limit: 20 });
+  const own = recent.find((message) => message.author.id === channel.client.user?.id && message.embeds.some((embed) => embed.author?.name?.includes("CAIXA DA GUILDA")));
+  if (own) await own.edit({ embeds: [financeEmbed(finance)] });
+  else await channel.send({ embeds: [financeEmbed(finance)] });
+}
+
 export async function provisionGuildStructure(guild: Guild): Promise<GuildConfig> {
   let config = await ensureGuildConfig(guild.id);
   const categoryIds = { ...config.categoryIds };
@@ -217,7 +264,7 @@ export async function provisionGuildStructure(guild: Guild): Promise<GuildConfig
     for (const channelSpec of spec.channels) {
       const topic = channelSpec.key === "painel-configuracao"
         ? "Sala privada para configurar a Companhia por botões e menus."
-        : channelSpec.key === "contratos-em-andamento"
+          : channelSpec.key === "contratos"
           ? "Tópicos individuais acompanham as missões aceitas pela Companhia."
           : undefined;
       const channel = await findOrCreateChannel(guild, channelSpec.name, channelSpec.type, category.id, topic);
@@ -226,8 +273,12 @@ export async function provisionGuildStructure(guild: Guild): Promise<GuildConfig
   }
   config = await setGuildStructure(guild.id, categoryIds, channelIds);
   await syncPanelPermissions(guild, config);
+  await syncOperationalPermissions(guild, config);
+  await ensureGuildFinance(guild.id);
   const panel = guild.channels.cache.get(channelIds["painel-configuracao"]);
   if (isTextChannel(panel)) await upsertPanelMessage(panel, config);
+  const treasury = guild.channels.cache.get(channelIds["caixa-guilda"]);
+  if (treasury) await upsertFinanceMessage(treasury, guild.id);
   return config;
 }
 
@@ -261,24 +312,28 @@ function contractEmbed(contract: Contract, participantText = "Nenhum participant
 }
 
 const statusChannelKeys: Record<ContractStatus, string> = {
-  available: "contratos-disponiveis",
-  accepted: "contratos-aceitos",
-  in_progress: "contratos-em-andamento",
-  completed: "contratos-concluidos",
-  cancelled: "arquivo-contratos",
-  archived: "arquivo-contratos",
+  available: "contratos",
+  accepted: "contratos",
+  in_progress: "contratos",
+  completed: "arquivo",
+  cancelled: "arquivo",
+  archived: "arquivo",
 };
 
 async function announceContractState(guild: Guild, config: GuildConfig, contract: Contract): Promise<void> {
   const channel = guild.channels.cache.get(config.channelIds[statusChannelKeys[contract.status]]);
   if (!isTextChannel(channel)) return;
-  await channel.send({ embeds: [contractEmbed(contract)] });
+  const components = contract.status === "available"
+    ? [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(`contract:apply:${contract.id}`).setLabel("Tenho interesse").setEmoji("🪶").setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId(`contract:view:${contract.id}`).setLabel("Ver detalhes").setEmoji("📜").setStyle(ButtonStyle.Secondary))]
+    : [];
+  await channel.send({ embeds: [contractEmbed(contract)], components });
 }
 
 async function contractDetail(interaction: ButtonInteraction, id: number): Promise<unknown> {
   const contract = await getContract(interaction.guildId!, id);
   if (!contract) return interaction.reply({ content: "Contrato não encontrado.", ephemeral: true });
   const participants = await listParticipants(interaction.guildId!, id);
+  const applicants = await listApplicants(interaction.guildId!, id);
   const participantText = participants.length
     ? participants.map((participant) => `<@${participant.userId}> — ${participant.displayName}${participant.shareAmount !== null ? ` — ${money(participant.shareAmount)}` : ""}`).join("\n")
     : "Nenhum participante registrado.";
@@ -290,6 +345,10 @@ async function contractDetail(interaction: ButtonInteraction, id: number): Promi
       new UserSelectMenuBuilder().setCustomId(`contract:participants:${id}`).setPlaceholder("👥 Montar equipe da missão").setMinValues(1).setMaxValues(10),
     ),
   ];
+  const pending = applicants.filter((applicant) => applicant.status === "pending").slice(0, 5);
+  if (pending.length && await canManage(interaction)) {
+    rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(...pending.map((applicant) => new ButtonBuilder().setCustomId(`contract:appapprove:${id}:${applicant.id}`).setLabel(`Aprovar ${applicant.displayName.slice(0, 12)}`).setEmoji("✅").setStyle(ButtonStyle.Success))));
+  }
   const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
     ...(contract.status === "completed" && contract.paymentStatus === "pending"
       ? [new ButtonBuilder().setCustomId(`contract:pay:${id}`).setLabel("Lançar pagamento").setEmoji(ICONS.coin).setStyle(ButtonStyle.Success)]
@@ -385,6 +444,41 @@ async function paymentModal(interaction: ButtonInteraction, id: number): Promise
   await interaction.showModal(modal);
 }
 
+async function maintenanceModal(interaction: ButtonInteraction, mode: "clear" | "wipe"): Promise<void> {
+  const modal = new ModalBuilder().setCustomId(`maintenance:${mode}`).setTitle(mode === "clear" ? "🧹 Limpar mensagens" : "⚠️ Apagar canais");
+  modal.addComponents(
+    new ActionRowBuilder<TextInputBuilder>().addComponents(input("confirmation", mode === "clear" ? "Digite LIMPAR para confirmar" : "Digite APAGAR TUDO para confirmar", TextInputStyle.Short, true, 20)),
+  );
+  await interaction.showModal(modal);
+}
+
+async function clearCurrentChannel(interaction: ModalSubmitInteraction): Promise<unknown> {
+  const channel = interaction.channel;
+  if (!channel || !channel.isTextBased() || !("bulkDelete" in channel)) throw new Error("Esta ação precisa ser executada em um canal de texto.");
+  await interaction.deferReply({ ephemeral: true });
+  const confirmation = interaction.fields.getTextInputValue("confirmation").trim().toUpperCase();
+  if (confirmation !== "LIMPAR") return interaction.editReply("Confirmação inválida. Nenhuma mensagem foi apagada.");
+  let deleted = 0;
+  while (true) {
+    const messages = await channel.messages.fetch({ limit: 100 });
+    if (!messages.size) break;
+    const result = await channel.bulkDelete(messages, true);
+    deleted += result.size;
+    if (messages.size < 100 || result.size === 0) break;
+  }
+  await interaction.editReply(`🧹 Limpeza concluída. **${deleted}** mensagem(ns) removida(s).`);
+}
+
+async function wipeServer(interaction: ModalSubmitInteraction): Promise<unknown> {
+  const confirmation = interaction.fields.getTextInputValue("confirmation").trim().toUpperCase();
+  if (confirmation !== "APAGAR TUDO") return interaction.reply({ content: "Confirmação inválida. Nenhum canal foi apagado.", ephemeral: true });
+  await interaction.reply({ content: "⚠️ Exclusão iniciada. Os canais serão removidos agora.", ephemeral: true });
+  const channels = [...interaction.guild!.channels.cache.values()];
+  for (const channel of channels) {
+    try { await channel.delete("Limpeza total solicitada por administrador"); } catch (error) { console.error(`Não foi possível apagar o canal ${channel.id}`, error); }
+  }
+}
+
 async function sendThreadUpdate(guild: Guild, contract: Contract, content: string): Promise<void> {
   if (!contract.threadId) return;
   const thread = guild.channels.cache.get(contract.threadId);
@@ -393,6 +487,14 @@ async function sendThreadUpdate(guild: Guild, contract: Contract, content: strin
 
 async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown> {
   if (!interaction.guild) return;
+  if (interaction.customId === "maintenance:clear") {
+    if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem limpar mensagens.", ephemeral: true });
+    return clearCurrentChannel(interaction);
+  }
+  if (interaction.customId === "maintenance:wipe") {
+    if (!hasAdministrator(interaction)) return interaction.reply({ content: "Apenas o proprietário ou Administrator pode apagar todos os canais.", ephemeral: true });
+    return wipeServer(interaction);
+  }
   if (interaction.customId === "config:roles") {
     if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem alterar cargos.", ephemeral: true });
     const managerRoleIds = parseRoleIds(interaction.fields.getTextInputValue("manager_roles"));
@@ -420,7 +522,7 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown
     if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem criar contratos.", ephemeral: true });
     try {
       const config = await getGuildConfig(interaction.guildId!);
-      const contractChannel = interaction.guild.channels.cache.get(config.channelIds["contratos-em-andamento"]);
+      const contractChannel = interaction.guild.channels.cache.get(config.channelIds.contratos);
       if (!isTextChannel(contractChannel)) throw new Error("Crie a estrutura da guilda pelo painel antes de registrar contratos.");
       const contract = await createContract({
         guildId: interaction.guildId!,
@@ -457,6 +559,8 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown
         await sendThreadUpdate(interaction.guild, contract, `Pagamento lançado: ${money(payment.totalAmount)}. A divisão foi registrada no histórico.`);
         await announceContractState(interaction.guild, await getGuildConfig(interaction.guildId!), contract);
       }
+      const financeChannel = interaction.guild.channels.cache.get((await getGuildConfig(interaction.guildId!)).channelIds["caixa-guilda"]);
+      if (financeChannel) await upsertFinanceMessage(financeChannel, interaction.guildId!);
       await interaction.reply({ content: `Pagamento lançado. ${money(payment.totalAmount)} distribuídos entre ${payment.participantsCount} participante(s).`, ephemeral: true });
     } catch (error) {
       await interaction.reply({ content: error instanceof Error ? error.message : "Não foi possível lançar o pagamento.", ephemeral: true });
@@ -489,6 +593,14 @@ async function handleButton(interaction: ButtonInteraction): Promise<unknown> {
     const config = await provisionGuildStructure(interaction.guild!);
     return interaction.update({ embeds: [panelEmbed(config)], components: panelComponents(), content: "" });
   }
+  if (interaction.customId === "panel:clear-chat") {
+    if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem limpar mensagens.", ephemeral: true });
+    return maintenanceModal(interaction, "clear");
+  }
+  if (interaction.customId === "panel:wipe-server") {
+    if (!hasAdministrator(interaction)) return interaction.reply({ content: "Apenas o proprietário ou Administrator pode apagar todos os canais.", ephemeral: true });
+    return maintenanceModal(interaction, "wipe");
+  }
   if (interaction.customId === "panel:new-contract") {
     if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem criar contratos.", ephemeral: true });
     return newContractModal(interaction);
@@ -500,6 +612,22 @@ async function handleButton(interaction: ButtonInteraction): Promise<unknown> {
   if (interaction.customId === "panel:payments") {
     if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem consultar pagamentos.", ephemeral: true });
     return paymentLedger(interaction);
+  }
+  if (interaction.customId.startsWith("contract:apply:")) {
+    const id = Number(interaction.customId.split(":")[2]);
+    try {
+      const applicant = await applyForContract({ guildId: interaction.guildId!, contractId: id, userId: interaction.user.id, displayName: interaction.user.globalName ?? interaction.user.username });
+      return interaction.reply({ content: `🪶 Interesse registrado para **${applicant.displayName}**. Aguarde a aprovação de um administrador; sua entrada ainda não foi confirmada na equipe.`, ephemeral: true });
+    } catch (error) {
+      return interaction.reply({ content: error instanceof Error ? error.message : "Não foi possível registrar seu interesse.", ephemeral: true });
+    }
+  }
+  if (interaction.customId.startsWith("contract:appapprove:")) {
+    if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem aprovar equipes.", ephemeral: true });
+    const [, , contractId, applicantId] = interaction.customId.split(":");
+    const applicant = await setApplicantStatus(interaction.guildId!, Number(applicantId), "approved");
+    if (applicant) await addParticipants(interaction.guildId!, Number(contractId), [{ userId: applicant.userId, displayName: applicant.displayName }]);
+    return interaction.reply({ content: applicant ? `✅ ${applicant.displayName} foi aprovado na equipe.` : "Interessado não encontrado.", ephemeral: true });
   }
   if (interaction.customId.startsWith("contract:view:")) return contractDetail(interaction, Number(interaction.customId.split(":")[2]));
   if (interaction.customId.startsWith("contract:pay:")) {
