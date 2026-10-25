@@ -1,6 +1,11 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import mysql, { type Pool, type ResultSetHeader, type RowDataPacket } from "mysql2/promise";
+import mysql, {
+  type Pool,
+  type ResultSetHeader,
+  type RowDataPacket,
+} from "mysql2/promise";
+
 
 export type ContractStatus =
   | "available"
@@ -78,17 +83,39 @@ let pool: Pool | null = null;
 
 function getPool(): Pool {
   if (pool) return pool;
+
   const url = process.env.DATABASE_URL;
-  if (!url) throw new Error("DATABASE_URL não configurada.");
+
+  if (!url) {
+    throw new Error("DATABASE_URL não configurada.");
+  }
+
+  const caPath = process.env.DATABASE_CA_PATH;
+  const parsed = new URL(url);
+
   pool = mysql.createPool({
-    uri: url,
+    host: parsed.hostname,
+    port: Number(parsed.port || 4000),
+    user: decodeURIComponent(parsed.username),
+    password: decodeURIComponent(parsed.password),
+    database: parsed.pathname.replace(/^\//, "") || "test",
     connectionLimit: 5,
     waitForConnections: true,
     queueLimit: 0,
     timezone: "Z",
+    ssl: caPath
+      ? {
+          ca: readFileSync(caPath),
+          rejectUnauthorized: true,
+        }
+      : {
+          rejectUnauthorized: false,
+        },
   });
+
   return pool;
 }
+
 
 const defaultTexts: Record<string, string> = {
   panelTitle: "Painel da Companhia",
