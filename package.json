@@ -1,0 +1,26 @@
+{
+  "name": "mercenary-guild-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Discord bot for a Skyrim RP mercenary guild.",
+  "packageManager": "pnpm@10.15.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "migrate": "tsx src/migrate.ts"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "mysql2": "^3.11.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
