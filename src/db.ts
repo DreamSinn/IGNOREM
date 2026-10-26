@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import mysql, { type Pool, type ResultSetHeader, type RowDataPacket } from "mysql2/promise";
 
@@ -42,6 +43,8 @@ export interface Contract {
   paymentStatus: "pending" | "paid";
   creatorId: string;
   threadId: string | null;
+  announcementMessageId: string | null;
+  announcementChannelId: string | null;
   createdAt: Date;
   completedAt: Date | null;
 }
@@ -94,6 +97,27 @@ export interface GuildFinance {
 
 type DbRow = RowDataPacket & Record<string, unknown>;
 
+function toCents(amount: number): number {
+  if (!Number.isFinite(amount)) throw new Error("Valor financeiro inválido.");
+  const cents = Math.round(amount * 100);
+  if (!Number.isSafeInteger(cents)) throw new Error("Valor financeiro fora do limite permitido.");
+  return cents;
+}
+
+function fromCents(cents: number): string {
+  return (cents / 100).toFixed(2);
+}
+
+async function ensureIndex(table: "contracts" | "payment_items", name: string, ddl: string): Promise<void> {
+  const [rows] = await getPool().query<RowDataPacket[]>(`SHOW INDEX FROM ${table} WHERE Key_name = ?`, [name]);
+  if (rows.length) return;
+  try {
+    await getPool().query(ddl);
+  } catch (error) {
+    if ((error as { code?: string }).code !== "ER_DUP_KEYNAME") throw error;
+  }
+}
+
 let pool: Pool | null = null;
 
 function getPool(): Pool {
@@ -104,7 +128,7 @@ function getPool(): Pool {
   const caPath = process.env.DATABASE_CA_PATH;
   pool = mysql.createPool({
     host: parsed.hostname,
-    port: Number(parsed.port || 4000),
+    port: Number(parsed.port || 3306),
     user: decodeURIComponent(parsed.username),
     password: decodeURIComponent(parsed.password),
     database: parsed.pathname.replace(/^\//, "") || "test",
@@ -114,7 +138,7 @@ function getPool(): Pool {
     timezone: "Z",
     ssl: caPath
       ? { ca: readFileSync(caPath), rejectUnauthorized: true }
-      : { rejectUnauthorized: false },
+      : { rejectUnauthorized: true },
   });
   return pool;
 }
@@ -172,6 +196,8 @@ function toContract(row: DbRow): Contract {
     paymentStatus: String(row.payment_status) as "pending" | "paid",
     creatorId: String(row.creator_id),
     threadId: row.thread_id ? String(row.thread_id) : null,
+    announcementMessageId: row.announcement_message_id ? String(row.announcement_message_id) : null,
+    announcementChannelId: row.announcement_channel_id ? String(row.announcement_channel_id) : null,
     createdAt: new Date(String(row.created_at)),
     completedAt: row.completed_at ? new Date(String(row.completed_at)) : null,
   };
@@ -196,6 +222,25 @@ export async function ensureSchema(): Promise<void> {
     .map((statement) => statement.trim())
     .filter(Boolean);
   for (const statement of statements) await getPool().query(statement);
+  const [messageIdColumn] = await getPool().query<RowDataPacket[]>("SHOW COLUMNS FROM contracts LIKE 'announcement_message_id'");
+  if (!messageIdColumn.length) {
+    try {
+      await getPool().query("ALTER TABLE contracts ADD COLUMN announcement_message_id VARCHAR(32) NULL AFTER thread_id");
+    } catch (error) {
+      if ((error as { code?: string }).code !== "ER_DUP_FIELDNAME") throw error;
+    }
+  }
+  const [channelIdColumn] = await getPool().query<RowDataPacket[]>("SHOW COLUMNS FROM contracts LIKE 'announcement_channel_id'");
+  if (!channelIdColumn.length) {
+    try {
+      await getPool().query("ALTER TABLE contracts ADD COLUMN announcement_channel_id VARCHAR(32) NULL AFTER announcement_message_id");
+    } catch (error) {
+      if ((error as { code?: string }).code !== "ER_DUP_FIELDNAME") throw error;
+    }
+  }
+  await ensureIndex("contracts", "idx_contracts_guild_status_created", "ALTER TABLE contracts ADD INDEX idx_contracts_guild_status_created (guild_id, status, created_at)");
+  await ensureIndex("contracts", "idx_contracts_guild_created", "ALTER TABLE contracts ADD INDEX idx_contracts_guild_created (guild_id, created_at)");
+  await ensureIndex("payment_items", "idx_payment_items_contract", "ALTER TABLE payment_items ADD INDEX idx_payment_items_contract (guild_id, contract_id)");
 }
 
 export async function closeDatabase(): Promise<void> {
@@ -292,15 +337,17 @@ export async function getGuildFinance(guildId: string): Promise<GuildFinance> {
 }
 
 export async function recordGuildExpense(input: { guildId: string; amount: number; description: string; createdBy: string }): Promise<GuildFinance> {
-  if (!Number.isFinite(input.amount) || input.amount <= 0) throw new Error("A despesa precisa ser maior que zero.");
+  const amountCents = toCents(input.amount);
+  if (amountCents <= 0) throw new Error("A despesa precisa ser maior que zero.");
   const connection = await getPool().getConnection();
   try {
     await connection.beginTransaction();
     const [financeRows] = await connection.execute<DbRow[]>("SELECT * FROM guild_finance WHERE guild_id = ? FOR UPDATE", [input.guildId]);
     if (!financeRows[0]) throw new Error("Caixa da guilda ainda não foi inicializado.");
-    if (Number(financeRows[0].balance) < input.amount) throw new Error(`Saldo insuficiente. Disponível: ${Number(financeRows[0].balance).toFixed(2)} septims.`);
-    await connection.execute("UPDATE guild_finance SET balance = balance - ? WHERE guild_id = ?", [input.amount.toFixed(2), input.guildId]);
-    await connection.execute("INSERT INTO guild_ledger (guild_id, kind, amount, description, created_by) VALUES (?, 'expense', ?, ?, ?)", [input.guildId, input.amount.toFixed(2), input.description, input.createdBy]);
+    const balanceCents = toCents(Number(financeRows[0].balance));
+    if (balanceCents < amountCents) throw new Error(`Saldo insuficiente. Disponível: ${fromCents(balanceCents)} septims.`);
+    await connection.execute("UPDATE guild_finance SET balance = balance - ? WHERE guild_id = ?", [fromCents(amountCents), input.guildId]);
+    await connection.execute("INSERT INTO guild_ledger (guild_id, kind, amount, description, created_by) VALUES (?, 'expense', ?, ?, ?)", [input.guildId, fromCents(amountCents), input.description, input.createdBy]);
     await connection.commit();
     return getGuildFinance(input.guildId);
   } catch (error) {
@@ -312,12 +359,32 @@ export async function recordGuildExpense(input: { guildId: string; amount: numbe
 }
 
 export async function applyForContract(input: { guildId: string; contractId: number; userId: string; displayName: string }): Promise<ContractApplicant> {
-  const contract = await getContract(input.guildId, input.contractId);
-  if (!contract) throw new Error("Contrato não encontrado.");
-  if (contract.status !== "available") throw new Error("As inscrições para este contrato estão encerradas.");
-  await getPool().execute(`INSERT INTO contract_applicants (contract_id, guild_id, user_id, display_name, status) VALUES (?, ?, ?, ?, 'pending') ON DUPLICATE KEY UPDATE display_name = VALUES(display_name), status = 'pending'`, [input.contractId, input.guildId, input.userId, input.displayName]);
-  const [rows] = await getPool().execute<DbRow[]>("SELECT * FROM contract_applicants WHERE guild_id = ? AND contract_id = ? AND user_id = ? LIMIT 1", [input.guildId, input.contractId, input.userId]);
-  return toApplicant(rows[0]);
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    const [contracts] = await connection.execute<DbRow[]>("SELECT * FROM contracts WHERE guild_id = ? AND id = ? FOR UPDATE", [input.guildId, input.contractId]);
+    if (!contracts[0]) throw new Error("Contrato não encontrado.");
+    if (String(contracts[0].status) !== "available") throw new Error("As inscrições para este contrato estão encerradas.");
+    await connection.execute(
+      `INSERT INTO contract_applicants (contract_id, guild_id, user_id, display_name, status)
+       VALUES (?, ?, ?, ?, 'pending')
+       ON DUPLICATE KEY UPDATE display_name = VALUES(display_name)`,
+      [input.contractId, input.guildId, input.userId, input.displayName],
+    );
+    let [rows] = await connection.execute<DbRow[]>("SELECT * FROM contract_applicants WHERE guild_id = ? AND contract_id = ? AND user_id = ? FOR UPDATE", [input.guildId, input.contractId, input.userId]);
+    if (String(rows[0]?.status) === "approved") throw new Error("Você já foi aprovado e faz parte da equipe deste contrato.");
+    if (String(rows[0]?.status) === "rejected") {
+      await connection.execute("UPDATE contract_applicants SET status = 'pending' WHERE id = ?", [rows[0].id]);
+      [rows] = await connection.execute<DbRow[]>("SELECT * FROM contract_applicants WHERE guild_id = ? AND contract_id = ? AND user_id = ? LIMIT 1", [input.guildId, input.contractId, input.userId]);
+    }
+    await connection.commit();
+    return toApplicant(rows[0]);
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 function toApplicant(row: DbRow): ContractApplicant {
@@ -329,10 +396,38 @@ export async function listApplicants(guildId: string, contractId: number): Promi
   return rows.map(toApplicant);
 }
 
-export async function setApplicantStatus(guildId: string, applicantId: number, status: "approved" | "rejected"): Promise<ContractApplicant | null> {
-  await getPool().execute("UPDATE contract_applicants SET status = ? WHERE guild_id = ? AND id = ?", [status, guildId, applicantId]);
-  const [rows] = await getPool().execute<DbRow[]>("SELECT * FROM contract_applicants WHERE guild_id = ? AND id = ? LIMIT 1", [guildId, applicantId]);
-  return rows[0] ? toApplicant(rows[0]) : null;
+export async function setApplicantStatus(guildId: string, contractId: number, applicantId: number, status: "approved" | "rejected"): Promise<ContractApplicant | null> {
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    const [contracts] = await connection.execute<DbRow[]>("SELECT * FROM contracts WHERE guild_id = ? AND id = ? FOR UPDATE", [guildId, contractId]);
+    if (!contracts[0]) throw new Error("Contrato não encontrado.");
+    if (status === "approved" && String(contracts[0].status) !== "available") throw new Error("As inscrições para este contrato já foram encerradas.");
+    if (String(contracts[0].payment_status) === "paid") throw new Error("A equipe não pode ser alterada depois que o pagamento foi registrado.");
+    const [applicants] = await connection.execute<DbRow[]>(
+      "SELECT * FROM contract_applicants WHERE guild_id = ? AND contract_id = ? AND id = ? FOR UPDATE",
+      [guildId, contractId, applicantId],
+    );
+    if (!applicants[0]) throw new Error("Interessado não encontrado neste contrato.");
+    if (String(applicants[0].status) !== "pending") throw new Error("Esta inscrição já foi processada.");
+    await connection.execute("UPDATE contract_applicants SET status = ? WHERE guild_id = ? AND contract_id = ? AND id = ?", [status, guildId, contractId, applicantId]);
+    if (status === "approved") {
+      await connection.execute(
+        `INSERT INTO contract_participants (contract_id, guild_id, user_id, display_name)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE display_name = VALUES(display_name)`,
+        [contractId, guildId, applicants[0].user_id, applicants[0].display_name],
+      );
+    }
+    const [updated] = await connection.execute<DbRow[]>("SELECT * FROM contract_applicants WHERE guild_id = ? AND contract_id = ? AND id = ? LIMIT 1", [guildId, contractId, applicantId]);
+    await connection.commit();
+    return updated[0] ? toApplicant(updated[0]) : null;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 export async function createContract(input: {
@@ -344,14 +439,17 @@ export async function createContract(input: {
   totalValue: number;
   creatorId: string;
 }): Promise<Contract> {
+  const totalCents = toCents(input.totalValue);
+  if (totalCents <= 0) throw new Error("O valor do contrato precisa ser maior que zero.");
   const connection = await getPool().getConnection();
   try {
     await connection.beginTransaction();
+    const temporaryCode = `TMP-${randomBytes(8).toString("hex")}`;
     const [result] = await connection.execute<ResultSetHeader>(
       `INSERT INTO contracts
        (guild_id, code, title, client, description, location, total_value, status, payment_status, creator_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'available', 'pending', ?)`,
-      [input.guildId, "PENDING", input.title, input.client, input.description, input.location, input.totalValue, input.creatorId],
+      [input.guildId, temporaryCode, input.title, input.client, input.description, input.location, fromCents(totalCents), input.creatorId],
     );
     const id = Number(result.insertId);
     const code = `CT-${String(id).padStart(4, "0")}`;
@@ -372,6 +470,13 @@ export async function setContractThread(guildId: string, id: number, threadId: s
   await getPool().execute("UPDATE contracts SET thread_id = ? WHERE guild_id = ? AND id = ?", [threadId, guildId, id]);
 }
 
+export async function setContractAnnouncement(guildId: string, id: number, channelId: string, messageId: string): Promise<void> {
+  await getPool().execute(
+    "UPDATE contracts SET announcement_channel_id = ?, announcement_message_id = ? WHERE guild_id = ? AND id = ?",
+    [channelId, messageId, guildId, id],
+  );
+}
+
 export async function getContract(guildId: string, id: number): Promise<Contract | null> {
   const [rows] = await getPool().execute<DbRow[]>("SELECT * FROM contracts WHERE guild_id = ? AND id = ? LIMIT 1", [guildId, id]);
   return rows[0] ? toContract(rows[0]) : null;
@@ -387,24 +492,43 @@ export async function listContracts(guildId: string, status?: ContractStatus): P
 }
 
 export async function setContractStatus(guildId: string, id: number, status: ContractStatus): Promise<Contract | null> {
-  const current = await getContract(guildId, id);
-  if (!current) return null;
-  const allowed: Record<ContractStatus, ContractStatus[]> = {
-    available: ["accepted", "cancelled"],
-    accepted: ["in_progress", "cancelled"],
-    in_progress: ["completed", "cancelled"],
-    completed: ["archived"],
-    cancelled: ["archived"],
-    archived: [],
-  };
-  if (current.status !== status && !allowed[current.status].includes(status)) {
-    throw new Error(`Transição inválida: ${STATUS_NAMES[current.status]} → ${STATUS_NAMES[status]}.`);
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    const [rows] = await connection.execute<DbRow[]>("SELECT * FROM contracts WHERE guild_id = ? AND id = ? FOR UPDATE", [guildId, id]);
+    if (!rows[0]) {
+      await connection.commit();
+      return null;
+    }
+    const current = toContract(rows[0]);
+    if (current.status === status) {
+      await connection.commit();
+      return current;
+    }
+    const allowed: Record<ContractStatus, ContractStatus[]> = {
+      available: ["accepted", "cancelled"],
+      accepted: ["in_progress", "cancelled"],
+      in_progress: ["completed", "cancelled"],
+      completed: ["archived"],
+      cancelled: ["archived"],
+      archived: [],
+    };
+    if (current.status !== status && !allowed[current.status].includes(status)) {
+      throw new Error(`Transição inválida: ${STATUS_NAMES[current.status]} → ${STATUS_NAMES[status]}.`);
+    }
+    await connection.execute(
+      "UPDATE contracts SET status = ?, completed_at = CASE WHEN ? = 'completed' THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE guild_id = ? AND id = ?",
+      [status, status, guildId, id],
+    );
+    const [updated] = await connection.execute<DbRow[]>("SELECT * FROM contracts WHERE guild_id = ? AND id = ? LIMIT 1", [guildId, id]);
+    await connection.commit();
+    return updated[0] ? toContract(updated[0]) : null;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
   }
-  await getPool().execute(
-    "UPDATE contracts SET status = ?, completed_at = CASE WHEN ? = 'completed' THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE guild_id = ? AND id = ?",
-    [status, status, guildId, id],
-  );
-  return getContract(guildId, id);
 }
 
 export async function addParticipants(
@@ -412,17 +536,29 @@ export async function addParticipants(
   contractId: number,
   participants: Array<{ userId: string; displayName: string }>,
 ): Promise<Participant[]> {
-  const contract = await getContract(guildId, contractId);
-  if (!contract) throw new Error("Contrato não encontrado.");
-  for (const participant of participants) {
-    await getPool().execute(
-      `INSERT INTO contract_participants (contract_id, guild_id, user_id, display_name)
-       VALUES (?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE display_name = VALUES(display_name)`,
-      [contractId, guildId, participant.userId, participant.displayName],
-    );
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    const [contracts] = await connection.execute<DbRow[]>("SELECT * FROM contracts WHERE guild_id = ? AND id = ? FOR UPDATE", [guildId, contractId]);
+    if (!contracts[0]) throw new Error("Contrato não encontrado.");
+    if (String(contracts[0].payment_status) === "paid") throw new Error("A equipe não pode ser alterada depois que o pagamento foi registrado.");
+    for (const participant of participants) {
+      await connection.execute(
+        `INSERT INTO contract_participants (contract_id, guild_id, user_id, display_name)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE display_name = VALUES(display_name)`,
+        [contractId, guildId, participant.userId, participant.displayName],
+      );
+    }
+    const [rows] = await connection.execute<DbRow[]>("SELECT * FROM contract_participants WHERE guild_id = ? AND contract_id = ? ORDER BY created_at ASC", [guildId, contractId]);
+    await connection.commit();
+    return rows.map(toParticipant);
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
   }
-  return listParticipants(guildId, contractId);
 }
 
 export async function listParticipants(guildId: string, contractId: number): Promise<Participant[]> {
@@ -459,39 +595,44 @@ export async function recordPayment(input: {
     );
     if (!participantRows.length) throw new Error("Adicione pelo menos um participante antes de pagar o contrato.");
 
-    const total = Number(input.totalAmount ?? contract.totalValue);
-    if (!Number.isFinite(total) || total <= 0) throw new Error("O valor do pagamento precisa ser maior que zero.");
+    const totalCents = toCents(Number(input.totalAmount ?? contract.totalValue));
+    if (totalCents <= 0) throw new Error("O valor do pagamento precisa ser maior que zero.");
     const [financeRows] = await connection.execute<DbRow[]>("SELECT * FROM guild_finance WHERE guild_id = ? FOR UPDATE", [input.guildId]);
     const sharePercent = Number(financeRows[0]?.share_percent ?? 10);
-    const guildShare = Math.round(total * sharePercent) / 100;
-    const distributedAmount = Math.round((total - guildShare) * 100) / 100;
-    const cents = Math.round(distributedAmount * 100);
-    const base = Math.floor(cents / participantRows.length);
-    const remainder = cents - base * participantRows.length;
+    const guildShareCents = Math.round(totalCents * sharePercent / 100);
+    const distributedCents = totalCents - guildShareCents;
+    const base = Math.floor(distributedCents / participantRows.length);
+    const remainder = distributedCents - base * participantRows.length;
+    const total = totalCents / 100;
+    const guildShare = guildShareCents / 100;
+    const distributedAmount = distributedCents / 100;
 
     const [paymentResult] = await connection.execute<ResultSetHeader>(
       `INSERT INTO payments (contract_id, guild_id, total_amount, participants_count, paid_by, note)
        VALUES (?, ?, ?, ?, ?, ?)`,
-      [input.contractId, input.guildId, total.toFixed(2), participantRows.length, input.paidBy, input.note],
+      [input.contractId, input.guildId, fromCents(totalCents), participantRows.length, input.paidBy, input.note],
     );
     const paymentId = Number(paymentResult.insertId);
     const items: PaymentItem[] = [];
     for (let index = 0; index < participantRows.length; index += 1) {
       const row = participantRows[index];
-      const amount = (base + (index < remainder ? 1 : 0)) / 100;
+      const amountCents = base + (index < remainder ? 1 : 0);
+      const amount = amountCents / 100;
       const displayName = String(row.display_name);
       const userId = String(row.user_id);
       items.push({ userId, displayName, amount });
-      await connection.execute("UPDATE contract_participants SET share_amount = ? WHERE id = ?", [amount.toFixed(2), row.id]);
+      await connection.execute("UPDATE contract_participants SET share_amount = ? WHERE id = ?", [fromCents(amountCents), row.id]);
       await connection.execute(
         `INSERT INTO payment_items (payment_id, contract_id, guild_id, user_id, display_name, amount)
          VALUES (?, ?, ?, ?, ?, ?)`,
-        [paymentId, input.contractId, input.guildId, userId, displayName, amount.toFixed(2)],
+        [paymentId, input.contractId, input.guildId, userId, displayName, fromCents(amountCents)],
       );
     }
     await connection.execute("UPDATE contracts SET payment_status = 'paid' WHERE guild_id = ? AND id = ?", [input.guildId, input.contractId]);
-    await connection.execute("UPDATE guild_finance SET balance = balance + ? WHERE guild_id = ?", [guildShare.toFixed(2), input.guildId]);
-    await connection.execute("INSERT INTO guild_ledger (guild_id, contract_id, kind, amount, description, created_by) VALUES (?, ?, 'income', ?, ?, ?)", [input.guildId, input.contractId, guildShare.toFixed(2), `Participação de ${contract.code}`, input.paidBy]);
+    if (guildShareCents > 0) {
+      await connection.execute("UPDATE guild_finance SET balance = balance + ? WHERE guild_id = ?", [fromCents(guildShareCents), input.guildId]);
+      await connection.execute("INSERT INTO guild_ledger (guild_id, contract_id, kind, amount, description, created_by) VALUES (?, ?, 'income', ?, ?, ?)", [input.guildId, input.contractId, fromCents(guildShareCents), `Participação de ${contract.code}`, input.paidBy]);
+    }
     await connection.commit();
     return {
       id: paymentId,

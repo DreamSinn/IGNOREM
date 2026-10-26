@@ -39,6 +39,7 @@ import {
   recordPayment,
   recordGuildExpense,
   setApplicantStatus,
+  setContractAnnouncement,
   setContractStatus,
   setContractThread,
   setGuildRoles,
@@ -111,7 +112,7 @@ async function hasConfiguredRole(interaction: Interaction, kind: "manager" | "ad
   if (!interaction.inGuild() || !interaction.member || !("roles" in interaction.member) || Array.isArray(interaction.member.roles)) return false;
   const roles = interaction.member.roles;
   const config = await getGuildConfig(interaction.guildId);
-  const ids = kind === "manager" ? config.managerRoleIds : config.adminRoleIds;
+  const ids = (kind === "manager" ? config.managerRoleIds : config.adminRoleIds).filter((id) => id !== interaction.guild?.roles.everyone.id);
   return ids.some((id) => roles.cache.has(id));
 }
 
@@ -210,23 +211,28 @@ async function findOrCreateChannel(guild: Guild, name: string, type: "text" | "v
 export async function syncPanelPermissions(guild: Guild, config: GuildConfig): Promise<void> {
   const panel = guild.channels.cache.get(config.channelIds["painel-configuracao"]);
   if (!isTextChannel(panel)) return;
+  const authorizedRoleIds = [...new Set([...config.adminRoleIds, ...config.managerRoleIds])].filter((id) => id !== guild.roles.everyone.id);
   const overwrites = [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     { id: guild.ownerId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
     { id: guild.client.user?.id ?? "", allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageThreads] },
-    ...[...config.adminRoleIds, ...config.managerRoleIds].map((id) => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] })),
+    ...authorizedRoleIds.map((id) => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] })),
   ].filter((entry) => entry.id);
   await panel.permissionOverwrites.set(overwrites, "Aplicar cargos autorizados ao painel");
 }
 
 async function syncOperationalPermissions(guild: Guild, config: GuildConfig): Promise<void> {
-  const adminIds = [...config.adminRoleIds, ...config.managerRoleIds];
-  const everyone = { id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] };
+  const adminIds = [...new Set([...config.adminRoleIds, ...config.managerRoleIds])].filter((id) => id !== guild.roles.everyone.id);
+  const everyone = {
+    id: guild.roles.everyone.id,
+    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+    deny: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.SendMessagesInThreads, PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.CreatePrivateThreads],
+  };
   const bot = { id: guild.client.user?.id ?? "", allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks, PermissionFlagsBits.ManageMessages, PermissionFlagsBits.ManageThreads, PermissionFlagsBits.ReadMessageHistory] };
-  const readOnly = [everyone, bot, ...adminIds.map((id) => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] }))].filter((entry) => entry.id);
+  const readOnly = [everyone, bot, ...adminIds.map((id) => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory], deny: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.SendMessagesInThreads, PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.CreatePrivateThreads] }))].filter((entry) => entry.id);
   const caixa = guild.channels.cache.get(config.channelIds["caixa-guilda"]);
   const arquivo = guild.channels.cache.get(config.channelIds.arquivo);
-  if (caixa && caixa.isTextBased() && "permissionOverwrites" in caixa) await caixa.permissionOverwrites.set([everyone, bot, ...adminIds.map((id) => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] }))].filter((entry) => entry.id), "Caixa somente leitura");
+  if (caixa && caixa.isTextBased() && "permissionOverwrites" in caixa) await caixa.permissionOverwrites.set(readOnly, "Caixa somente leitura");
   if (arquivo && arquivo.isTextBased() && "permissionOverwrites" in arquivo) await arquivo.permissionOverwrites.set(readOnly, "Arquivo somente leitura");
 }
 
@@ -241,17 +247,28 @@ function financeEmbed(finance: Awaited<ReturnType<typeof getGuildFinance>>): Emb
       { name: "Despesas acumuladas", value: money(finance.totalExpenses), inline: true },
       { name: "Participação por contrato", value: `${finance.sharePercent.toFixed(2)}%`, inline: true },
     )
-    .setFooter({ text: "Atualizado automaticamente após cada lançamento" })
+    .setFooter({ text: "COMPANHIA_FINANCE_MESSAGE • Atualizado automaticamente após cada lançamento" })
     .setTimestamp();
 }
 
 async function upsertFinanceMessage(channel: Channel, guildId: string): Promise<void> {
   if (!isTextChannel(channel)) return;
   const finance = await getGuildFinance(guildId);
-  const recent = await channel.messages.fetch({ limit: 20 });
-  const own = recent.find((message) => message.author.id === channel.client.user?.id && message.embeds.some((embed) => embed.author?.name?.includes("CAIXA DA GUILDA")));
-  if (own) await own.edit({ embeds: [financeEmbed(finance)] });
-  else await channel.send({ embeds: [financeEmbed(finance)] });
+  const recent = await channel.messages.fetch({ limit: 100 });
+  const matches = [...recent.values()]
+    .filter((message) => message.author.id === channel.client.user?.id && message.embeds.some((embed) => embed.footer?.text?.startsWith("COMPANHIA_FINANCE_MESSAGE")))
+    .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+  // Compatibilidade com o embed anterior, cujo nome do autor usa caracteres matemáticos Unicode.
+  if (!matches.length) {
+    matches.push(...[...recent.values()].filter((message) => message.author.id === channel.client.user?.id && message.embeds.some((embed) => embed.author?.name === "💰 𝗖𝗔𝗜𝗫𝗔 𝗗𝗔 𝗚𝗨𝗜𝗟𝗗𝗔")));
+    matches.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+  }
+  if (matches[0]) {
+    await matches[0].edit({ embeds: [financeEmbed(finance)] });
+    for (const duplicate of matches.slice(1)) await duplicate.delete().catch(() => undefined);
+  } else {
+    await channel.send({ embeds: [financeEmbed(finance)] });
+  }
 }
 
 export async function provisionGuildStructure(guild: Guild): Promise<GuildConfig> {
@@ -283,10 +300,13 @@ export async function provisionGuildStructure(guild: Guild): Promise<GuildConfig
 }
 
 async function upsertPanelMessage(channel: Extract<Channel, { type: ChannelType.GuildText }>, config: GuildConfig): Promise<void> {
-  const recent = await channel.messages.fetch({ limit: 30 });
-  const own = recent.find((message) => message.author.id === channel.client.user?.id && message.embeds.some((embed) => embed.title === config.texts.panelTitle));
-  if (own) {
-    await own.edit({ embeds: [panelEmbed(config)], components: panelComponents() });
+  const recent = await channel.messages.fetch({ limit: 100 });
+  const matches = [...recent.values()]
+    .filter((message) => message.author.id === channel.client.user?.id && message.embeds.some((embed) => embed.footer?.text === "COMPANHIA DE MERCENÁRIOS  •  O registro permanece" || embed.title === `${ICONS.crown}  ${config.texts.panelTitle}`))
+    .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+  if (matches[0]) {
+    await matches[0].edit({ embeds: [panelEmbed(config)], components: panelComponents() });
+    for (const duplicate of matches.slice(1)) await duplicate.delete().catch(() => undefined);
   } else {
     await channel.send({ embeds: [panelEmbed(config)], components: panelComponents() });
   }
@@ -320,43 +340,201 @@ const statusChannelKeys: Record<ContractStatus, string> = {
   archived: "arquivo",
 };
 
+function participantSummary(participants: Awaited<ReturnType<typeof listParticipants>>): string {
+  if (!participants.length) return "Nenhum participante registrado.";
+  const lines: string[] = [];
+  let length = 0;
+  for (const participant of participants) {
+    const line = `<@${participant.userId}> — ${participant.displayName}${participant.shareAmount !== null ? ` — ${money(participant.shareAmount)}` : ""}`;
+    if (length + line.length + (lines.length ? 1 : 0) > 900) break;
+    lines.push(line);
+    length += line.length + (lines.length > 1 ? 1 : 0);
+  }
+  const omitted = participants.length - lines.length;
+  if (omitted > 0) lines.push(`… e mais ${omitted} participante(s).`);
+  return lines.join("\n");
+}
+
+function isContractMessage(message: { author: { id: string }; embeds: readonly { footer?: { text?: string | null } | null }[] }, code: string, botId: string): boolean {
+  return message.author.id === botId && message.embeds.some((embed) => embed.footer?.text === `Registro da Companhia  •  ${code}`);
+}
+
+async function upsertContractThread(guild: Guild, contract: Contract, embed: EmbedBuilder): Promise<void> {
+  if (!contract.threadId) return;
+  try {
+    const thread = await guild.channels.fetch(contract.threadId);
+    if (!thread?.isThread()) return;
+    const recent = await thread.messages.fetch({ limit: 100 });
+    const matches = [...recent.values()]
+      .filter((message) => isContractMessage(message, contract.code, guild.client.user!.id))
+      .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+    if (matches[0]) {
+      await matches[0].edit({ embeds: [embed] });
+      for (const duplicate of matches.slice(1)) await duplicate.delete().catch(() => undefined);
+    } else {
+      await thread.send({ embeds: [embed] });
+    }
+  } catch (error) {
+    console.warn(`Não foi possível atualizar o tópico de ${contract.code}`, error);
+  }
+}
+
 async function announceContractState(guild: Guild, config: GuildConfig, contract: Contract): Promise<void> {
-  const channel = guild.channels.cache.get(config.channelIds[statusChannelKeys[contract.status]]);
-  if (!isTextChannel(channel)) return;
+  const botId = guild.client.user?.id;
+  if (!botId) return;
+  const participants = await listParticipants(guild.id, contract.id);
+  const embed = contractEmbed(contract, participantSummary(participants));
   const components = contract.status === "available"
     ? [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(`contract:apply:${contract.id}`).setLabel("Tenho interesse").setEmoji("🪶").setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId(`contract:view:${contract.id}`).setLabel("Ver detalhes").setEmoji("📜").setStyle(ButtonStyle.Secondary))]
     : [];
-  await channel.send({ embeds: [contractEmbed(contract)], components });
+  const target = guild.channels.cache.get(config.channelIds[statusChannelKeys[contract.status]]);
+  const targetChannel = isTextChannel(target) ? target : undefined;
+
+  let announcement;
+  let announcementPersisted = false;
+  let announcementChannel: Extract<Channel, { type: ChannelType.GuildText }> | undefined;
+  if (contract.announcementChannelId && contract.announcementMessageId) {
+    const savedChannel = guild.channels.cache.get(contract.announcementChannelId);
+    if (isTextChannel(savedChannel)) {
+      announcementChannel = savedChannel;
+      try {
+        announcement = await savedChannel.messages.fetch(contract.announcementMessageId);
+        announcementPersisted = true;
+      } catch {
+        announcement = undefined;
+      }
+    }
+  }
+
+  // Contratos publicados antes desta correção não possuem os IDs salvos; localizar e reaproveitar o cartão original.
+  if (!announcement) {
+    const legacyChannels = [...new Set([config.channelIds.contratos, config.channelIds.arquivo])]
+      .map((id) => guild.channels.cache.get(id))
+      .filter(isTextChannel);
+    const legacyMatches = [];
+    for (const channel of legacyChannels) {
+      const recent = await channel.messages.fetch({ limit: 100 }).catch(() => null);
+      if (!recent) continue;
+      legacyMatches.push(...[...recent.values()].filter((message) => isContractMessage(message, contract.code, botId)));
+    }
+    legacyMatches.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+    if (legacyMatches[0]) {
+      announcement = legacyMatches[0];
+      const foundChannel = guild.channels.cache.get(announcement.channelId);
+      if (isTextChannel(foundChannel)) announcementChannel = foundChannel;
+      for (const duplicate of legacyMatches.slice(1)) await duplicate.delete().catch(() => undefined);
+    }
+  }
+
+  // Mesmo com um ID persistido, limpar cartões deixados em outro canal por uma falha ao mover.
+  if (announcement) {
+    const channels = [...new Set([config.channelIds.contratos, config.channelIds.arquivo])]
+      .map((id) => guild.channels.cache.get(id))
+      .filter(isTextChannel);
+    for (const channel of channels) {
+      const recent = await channel.messages.fetch({ limit: 100 }).catch(() => null);
+      if (!recent) continue;
+      for (const duplicate of recent.values()) {
+        if (duplicate.id !== announcement.id && isContractMessage(duplicate, contract.code, botId)) {
+          await duplicate.delete().catch(() => undefined);
+        }
+      }
+    }
+  }
+
+  if (announcement && announcementChannel && targetChannel && announcementChannel.id !== targetChannel.id) {
+    try {
+      const moved = await targetChannel.send({ embeds: [embed], components });
+      try {
+        await setContractAnnouncement(guild.id, contract.id, targetChannel.id, moved.id);
+      } catch (error) {
+        await moved.delete().catch(() => undefined);
+        throw error;
+      }
+      announcementPersisted = true;
+      await announcement.delete().catch(() => undefined);
+      announcement = moved;
+      announcementChannel = targetChannel;
+    } catch {
+      // Se não for possível publicar no canal de destino, conserva e atualiza o cartão original.
+      try {
+        await announcement.edit({ embeds: [embed], components });
+        if (!announcementPersisted) {
+          await setContractAnnouncement(guild.id, contract.id, announcementChannel.id, announcement.id);
+          announcementPersisted = true;
+        }
+      } catch {
+        announcement = undefined;
+      }
+    }
+  } else if (announcement && announcementChannel) {
+    try {
+      await announcement.edit({ embeds: [embed], components });
+      if (!announcementPersisted) {
+        await setContractAnnouncement(guild.id, contract.id, announcementChannel.id, announcement.id);
+        announcementPersisted = true;
+      }
+    } catch {
+      announcement = undefined;
+    }
+  }
+  if (!announcement) {
+    if (!targetChannel) return;
+    const sent = await targetChannel.send({ embeds: [embed], components });
+    try {
+      await setContractAnnouncement(guild.id, contract.id, targetChannel.id, sent.id);
+      announcementPersisted = true;
+    } catch (error) {
+      await sent.delete().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  await upsertContractThread(guild, contract, embed);
 }
 
 async function contractDetail(interaction: ButtonInteraction, id: number): Promise<unknown> {
+  await interaction.deferReply({ ephemeral: true });
   const contract = await getContract(interaction.guildId!, id);
-  if (!contract) return interaction.reply({ content: "Contrato não encontrado.", ephemeral: true });
+  if (!contract) return interaction.editReply({ content: "Contrato não encontrado." });
   const participants = await listParticipants(interaction.guildId!, id);
   const applicants = await listApplicants(interaction.guildId!, id);
-  const participantText = participants.length
-    ? participants.map((participant) => `<@${participant.userId}> — ${participant.displayName}${participant.shareAmount !== null ? ` — ${money(participant.shareAmount)}` : ""}`).join("\n")
-    : "Nenhum participante registrado.";
-  const rows: ActionRowBuilder<ButtonBuilder | UserSelectMenuBuilder | StringSelectMenuBuilder>[] = [
-    new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-      new StringSelectMenuBuilder().setCustomId(`contract:status:${id}`).setPlaceholder("📌 Alterar situação da missão").addOptions(statusOptions),
-    ),
-    new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(
+  const participantText = participantSummary(participants);
+  const transitions: Record<ContractStatus, ContractStatus[]> = {
+    available: ["accepted", "cancelled"],
+    accepted: ["in_progress", "cancelled"],
+    in_progress: ["completed", "cancelled"],
+    completed: ["archived"],
+    cancelled: ["archived"],
+    archived: [],
+  };
+  const rows: ActionRowBuilder<ButtonBuilder | UserSelectMenuBuilder | StringSelectMenuBuilder>[] = [];
+  if (transitions[contract.status].length) {
+    rows.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`contract:status:${id}`)
+        .setPlaceholder("📌 Alterar situação da missão")
+        .addOptions(statusOptions.filter((option) => transitions[contract.status].includes(option.value as ContractStatus))),
+    ));
+  }
+  if (contract.paymentStatus === "pending") {
+    rows.push(new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(
       new UserSelectMenuBuilder().setCustomId(`contract:participants:${id}`).setPlaceholder("👥 Montar equipe da missão").setMinValues(1).setMaxValues(10),
-    ),
-  ];
+    ));
+  }
   const pending = applicants.filter((applicant) => applicant.status === "pending").slice(0, 5);
-  if (pending.length && await canManage(interaction)) {
+  if (pending.length && contract.status === "available" && await canManage(interaction)) {
     rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(...pending.map((applicant) => new ButtonBuilder().setCustomId(`contract:appapprove:${id}:${applicant.id}`).setLabel(`Aprovar ${applicant.displayName.slice(0, 12)}`).setEmoji("✅").setStyle(ButtonStyle.Success))));
   }
-  const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    ...(contract.status === "completed" && contract.paymentStatus === "pending"
-      ? [new ButtonBuilder().setCustomId(`contract:pay:${id}`).setLabel("Lançar pagamento").setEmoji(ICONS.coin).setStyle(ButtonStyle.Success)]
-      : []),
-    new ButtonBuilder().setCustomId(`contract:archive:${id}`).setLabel("Arquivar registro").setEmoji("📦").setStyle(ButtonStyle.Secondary),
-  );
-  rows.push(buttons);
-  await interaction.reply({ embeds: [contractEmbed(contract, participantText)], components: rows, ephemeral: true });
+  const buttons = new ActionRowBuilder<ButtonBuilder>();
+  if (contract.status === "completed" && contract.paymentStatus === "pending") {
+    buttons.addComponents(new ButtonBuilder().setCustomId(`contract:pay:${id}`).setLabel("Lançar pagamento").setEmoji(ICONS.coin).setStyle(ButtonStyle.Success));
+  }
+  if (transitions[contract.status].includes("archived")) {
+    buttons.addComponents(new ButtonBuilder().setCustomId(`contract:archive:${id}`).setLabel("Arquivar registro").setEmoji("📦").setStyle(ButtonStyle.Secondary));
+  }
+  if (buttons.components.length) rows.push(buttons);
+  await interaction.editReply({ embeds: [contractEmbed(contract, participantText)], components: rows });
 }
 
 async function contractsMenu(interaction: ButtonInteraction | ChatInputCommandInteraction): Promise<void> {
@@ -369,19 +547,29 @@ async function contractsMenu(interaction: ButtonInteraction | ChatInputCommandIn
 }
 
 async function showContractList(interaction: StringSelectMenuInteraction, value: string): Promise<unknown> {
+  await interaction.deferUpdate();
   const status = value === "all" ? undefined : value as ContractStatus;
   const contracts = await listContracts(interaction.guildId!, status);
-  if (!contracts.length) return interaction.update({ content: "Nenhum contrato encontrado para esse filtro.", components: [], embeds: [] });
-  const lines = contracts.slice(0, 15).map((contract) => `${STATUS_LABELS[contract.status]}  **${contract.code}** — ${contract.title}\n> ${money(contract.totalValue)}  •  pagamento: ${contract.paymentStatus === "paid" ? "lançado" : "pendente"}`);
+  if (!contracts.length) return interaction.editReply({ content: "Nenhum contrato encontrado para esse filtro.", components: [], embeds: [] });
+  const candidates = contracts.slice(0, 15).map((contract) => `${STATUS_LABELS[contract.status]}  **${contract.code}** — ${contract.title}\n> ${money(contract.totalValue)}  •  pagamento: ${contract.paymentStatus === "paid" ? "lançado" : "pendente"}`);
+  const lines: string[] = [];
+  let contentLength = 100;
+  for (const line of candidates) {
+    if (contentLength + line.length + 2 > 1850) break;
+    lines.push(line);
+    contentLength += line.length + 2;
+  }
   const buttons = new ActionRowBuilder<ButtonBuilder>();
   for (const contract of contracts.slice(0, 5)) buttons.addComponents(new ButtonBuilder().setCustomId(`contract:view:${contract.id}`).setLabel(contract.code).setStyle(ButtonStyle.Secondary));
-  await interaction.update({ content: `${ICONS.book} **Contratos registrados${status ? ` — ${STATUS_LABELS[status]}` : ""}**\n\n${lines.join("\n\n")}${contracts.length > 15 ? "\n\n_Exibindo os 15 mais recentes._" : ""}`, components: buttons.components.length ? [buttons] : [] });
+  const hidden = contracts.length - lines.length;
+  await interaction.editReply({ content: `${ICONS.book} **Contratos registrados${status ? ` — ${STATUS_LABELS[status]}` : ""}**\n\n${lines.join("\n\n")}${hidden > 0 ? `\n\n_Exibindo ${lines.length} de ${contracts.length} contratos; refine o filtro para ver outros._` : ""}`, components: buttons.components.length ? [buttons] : [] });
 }
 
 async function paymentLedger(interaction: ButtonInteraction | ChatInputCommandInteraction): Promise<void> {
+  await interaction.deferReply({ ephemeral: true });
   const contracts = (await listContracts(interaction.guildId!)).filter((contract) => contract.paymentStatus === "paid");
   if (!contracts.length) {
-    await interaction.reply({ content: `${ICONS.coin} **Livro-caixa vazio**\nAinda não há pagamentos registrados para esta guilda.`, ephemeral: true });
+    await interaction.editReply(`${ICONS.coin} **Livro-caixa vazio**\nAinda não há pagamentos registrados para esta guilda.`);
     return;
   }
   const lines: string[] = [];
@@ -389,14 +577,18 @@ async function paymentLedger(interaction: ButtonInteraction | ChatInputCommandIn
     const payment = await getPayment(interaction.guildId!, contract.id);
     lines.push(`**${contract.code}**  ${contract.title}\n> ${ICONS.coin} ${money(payment?.totalAmount ?? contract.totalValue)}  •  ${payment?.items.length ?? 0} participante(s)`);
   }
+  const paymentFields = [];
+  for (let index = 0; index < lines.length; index += 4) {
+    paymentFields.push({ name: index === 0 ? "Lançamentos recentes" : "Continuação", value: lines.slice(index, index + 4).join("\n\n"), inline: false });
+  }
   const embed = new EmbedBuilder()
     .setColor(COLORS.gold)
     .setAuthor({ name: `${ICONS.coin}  LIVRO-CAIXA DA COMPANHIA` })
     .setDescription("Pagamentos lançados e registrados no histórico financeiro.")
-    .addFields({ name: "Lançamentos recentes", value: lines.join("\n\n") })
+    .addFields(paymentFields)
     .setFooter({ text: contracts.length > 15 ? "Exibindo os 15 lançamentos mais recentes" : "Histórico financeiro auditável" })
     .setTimestamp();
-  await interaction.reply({ embeds: [embed], ephemeral: true });
+  await interaction.editReply({ embeds: [embed] });
 }
 
 async function newContractModal(interaction: ButtonInteraction | ChatInputCommandInteraction): Promise<void> {
@@ -479,14 +671,8 @@ async function wipeServer(interaction: ModalSubmitInteraction): Promise<unknown>
   }
 }
 
-async function sendThreadUpdate(guild: Guild, contract: Contract, content: string): Promise<void> {
-  if (!contract.threadId) return;
-  const thread = guild.channels.cache.get(contract.threadId);
-  if (thread && thread.isThread()) await thread.send({ content });
-}
-
 async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown> {
-  if (!interaction.guild) return;
+  if (!interaction.guild) return interaction.reply({ content: "Esta ação só pode ser usada dentro de um servidor.", ephemeral: true });
   if (interaction.customId === "maintenance:clear") {
     if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem limpar mensagens.", ephemeral: true });
     return clearCurrentChannel(interaction);
@@ -497,17 +683,20 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown
   }
   if (interaction.customId === "config:roles") {
     if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem alterar cargos.", ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
     const managerRoleIds = parseRoleIds(interaction.fields.getTextInputValue("manager_roles"));
     const adminRoleIds = parseRoleIds(interaction.fields.getTextInputValue("admin_roles"));
-    const invalid = [...managerRoleIds, ...adminRoleIds].filter((id) => !interaction.guild!.roles.cache.has(id));
-    if (invalid.length) return interaction.reply({ content: `IDs de cargo não encontrados: ${invalid.join(", ")}`, ephemeral: true });
+    const invalid = [...managerRoleIds, ...adminRoleIds].filter((id) => !interaction.guild!.roles.cache.has(id) || id === interaction.guild!.roles.everyone.id);
+    if (invalid.length) return interaction.editReply(`IDs de cargo inválidos: ${invalid.join(", ")}. O cargo @everyone não pode ser autorizado.`);
     const config = await setGuildRoles(interaction.guildId!, managerRoleIds, adminRoleIds);
     await syncPanelPermissions(interaction.guild, config);
-    await interaction.reply({ content: "Cargos autorizados atualizados. O painel agora respeita essa lista.", ephemeral: true });
+    await syncOperationalPermissions(interaction.guild, config);
+    await interaction.editReply("Cargos autorizados atualizados. O painel e os canais operacionais respeitam essa lista.");
     return;
   }
   if (interaction.customId === "config:texts") {
     if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem alterar textos.", ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
     const config = await setGuildTexts(interaction.guildId!, {
       panelTitle: interaction.fields.getTextInputValue("panel_title"),
       panelDescription: interaction.fields.getTextInputValue("panel_description"),
@@ -515,11 +704,13 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown
       paymentIntro: interaction.fields.getTextInputValue("payment_intro"),
     });
     await provisionGuildStructure(interaction.guild);
-    await interaction.reply({ content: "Textos atualizados no painel e na configuração da guilda.", ephemeral: true });
+    await interaction.editReply("Textos atualizados no painel e na configuração da guilda.");
     return;
   }
   if (interaction.customId === "contract:create") {
     if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem criar contratos.", ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    let createdContract: Contract | null = null;
     try {
       const config = await getGuildConfig(interaction.guildId!);
       const contractChannel = interaction.guild.channels.cache.get(config.channelIds.contratos);
@@ -533,18 +724,23 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown
         description: interaction.fields.getTextInputValue("description"),
         creatorId: interaction.user.id,
       });
+      createdContract = contract;
       const thread = await contractChannel.threads.create({ name: `${contract.code} — ${contract.title}`.slice(0, 100), autoArchiveDuration: 10080, reason: "Tópico de contrato" });
       await setContractThread(interaction.guildId!, contract.id, thread.id);
       await thread.send({ embeds: [contractEmbed(contract)] });
       await announceContractState(interaction.guild, config, contract);
-      await interaction.reply({ content: `Contrato ${contract.code} criado. Tópico: ${thread}`, ephemeral: true });
+      await interaction.editReply(`Contrato ${contract.code} criado. Tópico: ${thread}`);
     } catch (error) {
-      await interaction.reply({ content: error instanceof Error ? error.message : "Não foi possível criar o contrato.", ephemeral: true });
+      const detail = error instanceof Error ? error.message : "falha não identificada";
+      await interaction.editReply(createdContract
+        ? `O contrato ${createdContract.code} foi salvo, mas houve uma falha ao publicar todas as mensagens: ${detail}. Não crie outro com os mesmos dados; informe um administrador para reparar a publicação.`
+        : `Não foi possível criar o contrato: ${detail}`);
     }
     return;
   }
   if (interaction.customId.startsWith("contract:payment:")) {
     if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem registrar pagamentos.", ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
     const id = Number(interaction.customId.split(":")[2]);
     try {
       const payment = await recordPayment({
@@ -556,14 +752,13 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown
       });
       const contract = await getContract(interaction.guildId!, id);
       if (contract) {
-        await sendThreadUpdate(interaction.guild, contract, `Pagamento lançado: ${money(payment.totalAmount)}. A divisão foi registrada no histórico.`);
         await announceContractState(interaction.guild, await getGuildConfig(interaction.guildId!), contract);
       }
       const financeChannel = interaction.guild.channels.cache.get((await getGuildConfig(interaction.guildId!)).channelIds["caixa-guilda"]);
       if (financeChannel) await upsertFinanceMessage(financeChannel, interaction.guildId!);
-      await interaction.reply({ content: `Pagamento lançado. ${money(payment.totalAmount)} distribuídos entre ${payment.participantsCount} participante(s).`, ephemeral: true });
+      await interaction.editReply(`Pagamento lançado. ${money(payment.totalAmount)} distribuídos entre ${payment.participantsCount} participante(s).`);
     } catch (error) {
-      await interaction.reply({ content: error instanceof Error ? error.message : "Não foi possível lançar o pagamento.", ephemeral: true });
+      await interaction.editReply(error instanceof Error ? error.message : "Não foi possível lançar o pagamento.");
     }
   }
 }
@@ -590,8 +785,9 @@ async function handleButton(interaction: ButtonInteraction): Promise<unknown> {
   }
   if (interaction.customId === "panel:refresh") {
     if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem atualizar o painel.", ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
     const config = await provisionGuildStructure(interaction.guild!);
-    return interaction.update({ embeds: [panelEmbed(config)], components: panelComponents(), content: "" });
+    return interaction.editReply(`Painel e estrutura sincronizados. Sala privada: <#${config.channelIds["painel-configuracao"]}>`);
   }
   if (interaction.customId === "panel:clear-chat") {
     if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem limpar mensagens.", ephemeral: true });
@@ -615,19 +811,28 @@ async function handleButton(interaction: ButtonInteraction): Promise<unknown> {
   }
   if (interaction.customId.startsWith("contract:apply:")) {
     const id = Number(interaction.customId.split(":")[2]);
+    await interaction.deferReply({ ephemeral: true });
     try {
       const applicant = await applyForContract({ guildId: interaction.guildId!, contractId: id, userId: interaction.user.id, displayName: interaction.user.globalName ?? interaction.user.username });
-      return interaction.reply({ content: `🪶 Interesse registrado para **${applicant.displayName}**. Aguarde a aprovação de um administrador; sua entrada ainda não foi confirmada na equipe.`, ephemeral: true });
+      return interaction.editReply(`🪶 Interesse registrado para **${applicant.displayName}**. Aguarde a aprovação de um administrador; sua entrada ainda não foi confirmada na equipe.`);
     } catch (error) {
-      return interaction.reply({ content: error instanceof Error ? error.message : "Não foi possível registrar seu interesse.", ephemeral: true });
+      return interaction.editReply(error instanceof Error ? error.message : "Não foi possível registrar seu interesse.");
     }
   }
   if (interaction.customId.startsWith("contract:appapprove:")) {
     if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem aprovar equipes.", ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
     const [, , contractId, applicantId] = interaction.customId.split(":");
-    const applicant = await setApplicantStatus(interaction.guildId!, Number(applicantId), "approved");
-    if (applicant) await addParticipants(interaction.guildId!, Number(contractId), [{ userId: applicant.userId, displayName: applicant.displayName }]);
-    return interaction.reply({ content: applicant ? `✅ ${applicant.displayName} foi aprovado na equipe.` : "Interessado não encontrado.", ephemeral: true });
+    try {
+      const applicant = await setApplicantStatus(interaction.guildId!, Number(contractId), Number(applicantId), "approved");
+      if (applicant) {
+        const updatedContract = await getContract(interaction.guildId!, Number(contractId));
+        if (updatedContract) await announceContractState(interaction.guild!, await getGuildConfig(interaction.guildId!), updatedContract);
+      }
+      return interaction.editReply(applicant ? `✅ ${applicant.displayName} foi aprovado na equipe.` : "Interessado não encontrado.");
+    } catch (error) {
+      return interaction.editReply(error instanceof Error ? error.message : "Não foi possível aprovar o interessado.");
+    }
   }
   if (interaction.customId.startsWith("contract:view:")) return contractDetail(interaction, Number(interaction.customId.split(":")[2]));
   if (interaction.customId.startsWith("contract:pay:")) {
@@ -636,10 +841,11 @@ async function handleButton(interaction: ButtonInteraction): Promise<unknown> {
   }
   if (interaction.customId.startsWith("contract:archive:")) {
     if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem arquivar contratos.", ephemeral: true });
+    await interaction.deferUpdate();
     const id = Number(interaction.customId.split(":")[2]);
     const contract = await setContractStatus(interaction.guildId!, id, "archived");
     if (contract) await announceContractState(interaction.guild!, await getGuildConfig(interaction.guildId!), contract);
-    return interaction.update({ content: contract ? `${contract.code} arquivado.` : "Contrato não encontrado.", embeds: [], components: [] });
+    return interaction.editReply({ content: contract ? `${contract.code} arquivado.` : "Contrato não encontrado.", embeds: [], components: [] });
   }
 }
 
@@ -650,23 +856,33 @@ async function handleSelect(interaction: StringSelectMenuInteraction | UserSelec
   }
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith("contract:status:")) {
     if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem alterar contratos.", ephemeral: true });
+    await interaction.deferUpdate();
     const id = Number(interaction.customId.split(":")[2]);
     const status = interaction.values[0] as ContractStatus;
     const contract = await setContractStatus(interaction.guildId!, id, status);
     if (contract) {
-      await sendThreadUpdate(interaction.guild!, contract, `Estado atualizado: ${STATUS_LABELS[status]}.`);
       await announceContractState(interaction.guild!, await getGuildConfig(interaction.guildId!), contract);
     }
-    return interaction.reply({ content: contract ? `${contract.code} agora está ${STATUS_LABELS[status].toLowerCase()}.` : "Contrato não encontrado.", ephemeral: true });
+    return interaction.editReply({
+      content: contract ? `${contract.code} agora está ${STATUS_LABELS[status].toLowerCase()}.` : "Contrato não encontrado.",
+      embeds: [],
+      components: [],
+    });
   }
   if (interaction.isUserSelectMenu() && interaction.customId.startsWith("contract:participants:")) {
     if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem definir participantes.", ephemeral: true });
+    await interaction.deferUpdate();
     const id = Number(interaction.customId.split(":")[2]);
     const selected = [...interaction.users.values()].map((user) => ({ userId: user.id, displayName: user.globalName ?? user.username }));
-    const participants = await addParticipants(interaction.guildId!, id, selected);
+    await addParticipants(interaction.guildId!, id, selected);
     const contract = await getContract(interaction.guildId!, id);
-    if (contract) await sendThreadUpdate(interaction.guild!, contract, `Equipe atualizada: ${participants.map((participant) => participant.displayName).join(", ")}.`);
-    return interaction.reply({ content: `${selected.length} participante(s) adicionado(s) a ${contract?.code ?? "o contrato"}.`, ephemeral: true });
+    if (!contract) return interaction.editReply({ content: "Contrato não encontrado.", embeds: [], components: [] });
+    const participants = await listParticipants(interaction.guildId!, id);
+    await announceContractState(interaction.guild!, await getGuildConfig(interaction.guildId!), contract);
+    return interaction.editReply({
+      embeds: [contractEmbed(contract, participantSummary(participants))],
+      components: interaction.message.components,
+    });
   }
 }
 
@@ -729,8 +945,12 @@ export function attachDiscordHandlers(client: Client): void {
       console.error("Falha ao processar interação Discord", error);
       if (interaction.isRepliable()) {
         const content = "A ação não pôde ser concluída. Consulte os logs do bot.";
-        if (interaction.deferred) await interaction.editReply({ content, embeds: [], components: [] });
-        else if (!interaction.replied) await interaction.reply({ content, ephemeral: true });
+        try {
+          if (interaction.deferred) await interaction.editReply({ content, embeds: [], components: [] });
+          else if (!interaction.replied) await interaction.reply({ content, ephemeral: true });
+        } catch (replyError) {
+          console.error("Não foi possível responder à interação Discord; ela pode ter expirado", replyError);
+        }
       }
     }
   });

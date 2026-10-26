@@ -4,9 +4,11 @@ Bot para uma organização de mercenários de RP de Skyrim. A operação acontec
 
 ## O que a primeira versão faz
 
-O bot cria categorias de comando, contratos, finanças, operações e configuração; cria salas de texto e voz sem duplicar canais com os mesmos nomes; cria um tópico para cada contrato; mantém os estados disponível, aceito, em andamento, concluído, cancelado e arquivado; e registra pagamentos em septims com divisão igual entre os participantes.
+O bot cria uma categoria da Companhia com canais de painel, contratos, chat-geral, arquivo e caixa; cria um tópico para cada contrato; mantém os estados disponível, aceito, em andamento, concluído, cancelado e arquivado; e registra pagamentos em septims. Nesta versão não há criação de categorias separadas nem de canais de voz.
 
-A divisão é feita em centavos. Quando o valor não divide exatamente, os centavos restantes são distribuídos de forma determinística entre os primeiros participantes registrados para que a soma das parcelas seja sempre igual ao total pago.
+A divisão é feita em centavos. O percentual de caixa salvo para a guilda (10% por padrão) é reservado; o restante é dividido igualmente, e os centavos restantes são distribuídos de forma determinística entre os primeiros participantes. A regra do percentual precisa ser alinhada ao plano/TODO, que descrevem a divisão do valor total entre os participantes.
+
+O cartão público de cada contrato é atualizado na mesma mensagem quando a equipe, a situação ou o pagamento muda. O bot persiste o ID do cartão e reaproveita mensagens antigas ao primeiro atualizar um contrato, evitando republicações repetidas; a migração dos campos necessários roda automaticamente na inicialização.
 
 ## Criar o aplicativo Discord
 
@@ -18,7 +20,7 @@ A divisão é feita em centavos. Quando o valor não divide exatamente, os centa
 
 ## Variáveis protegidas
 
-Configure `DATABASE_URL` pelo banco gerenciado do projeto e `DISCORD_TOKEN` pelo recurso de segredos do projeto. `DISCORD_GUILD_ID` é opcional e serve para registrar `/painel` imediatamente em um servidor durante a instalação; sem ele, o comando é registrado globalmente e pode levar algum tempo para aparecer. `PORT` usa 3000 por padrão.
+Configure `DATABASE_URL` pelo banco gerenciado do projeto e `DISCORD_TOKEN` pelo recurso de segredos do projeto. O TLS do MySQL valida certificados por padrão; se o provedor usar uma CA privada, informe o caminho em `DATABASE_CA_PATH`. `DISCORD_GUILD_ID` é opcional e serve para registrar `/painel` imediatamente em um servidor durante a instalação; sem ele, o comando é registrado globalmente e pode levar algum tempo para aparecer. `PORT` usa 3000 por padrão.
 
 ## Execução local
 
@@ -30,7 +32,7 @@ pnpm typecheck
 pnpm start
 ```
 
-O endpoint `GET /health` retorna o estado do processo e se o cliente Discord está conectado. O schema é aplicado automaticamente na inicialização e também pode ser aplicado com `pnpm migrate`.
+O endpoint `GET /health` começa a responder antes da inicialização do banco/Discord e informa separadamente se o banco está pronto e se o bot está conectado; a conexão Discord não é exigida para a resposta. O schema, incluindo candidaturas e tabelas financeiras, é aplicado automaticamente na inicialização e também pode ser aplicado com `pnpm migrate`.
 
 ## Hospedagem
 
