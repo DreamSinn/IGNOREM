@@ -8,15 +8,19 @@ O bot cria uma categoria da Companhia com canais de painel, contratos, chat-gera
 
 A divisão é feita em centavos. O percentual de caixa salvo para a guilda (10% por padrão) é reservado; o restante é dividido igualmente, e os centavos restantes são distribuídos de forma determinística entre os primeiros participantes. A regra do percentual precisa ser alinhada ao plano/TODO, que descrevem a divisão do valor total entre os participantes.
 
-O cartão público de cada contrato é atualizado na mesma mensagem quando a equipe, a situação ou o pagamento muda. O bot persiste o ID do cartão e reaproveita mensagens antigas ao primeiro atualizar um contrato, evitando republicações repetidas; a migração dos campos necessários roda automaticamente na inicialização.
+O cartão público de cada contrato é atualizado quando a equipe, a situação ou o pagamento muda. O botão **Detalhes / atualizar** permanece no anúncio para que gerentes possam abrir as próximas transições (inclusive **Em andamento**) mesmo depois de aceitar a missão. Em **Sincronizar anúncio**, o bot tenta reparar cartões antigos e remover cópias.
+
+O Discord não permite mover uma mensagem para outro canal mantendo o mesmo ID: ao arquivar, o bot publica o cartão atualizado no canal de arquivo e apaga a mensagem anterior. Para isso, precisa conseguir enviar no canal de arquivo e apagar suas próprias mensagens no canal de origem; se a exclusão falhar, o bot mantém o anúncio original atualizado e informa o problema, sem esconder a falha. O ID do cartão é persistido para evitar novas publicações duplicadas.
 
 ## Criar o aplicativo Discord
 
 1. Acesse o [Discord Developer Portal](https://discord.com/developers/applications) e crie uma Application.
 2. Em **Bot**, crie o bot e copie o token apenas para o armazenamento seguro do projeto. Nunca publique o token no chat ou no Git.
-3. Em **OAuth2 > URL Generator**, selecione os escopos `bot` e `applications.commands`. Conceda as permissões necessárias para criar e editar canais, enviar mensagens, criar tópicos, gerenciar tópicos e usar menus/modais. O convite deve ser feito por um administrador do servidor.
+3. Em **OAuth2 > URL Generator**, selecione os escopos `bot` e `applications.commands`. Conceda as permissões necessárias para criar e editar canais, enviar mensagens, criar tópicos, gerenciar tópicos, **Gerenciar mensagens** e usar menus/modais. O convite deve ser feito por um administrador do servidor.
 4. Depois que o bot estiver no servidor, execute `/painel`. O proprietário ou alguém com Administrator pode inicializar a estrutura.
 5. Na sala privada criada, use **Definir cargos** e informe os IDs dos cargos de gerente e administrador. O modo desenvolvedor do Discord permite copiar IDs.
+
+Após atualizar o bot, execute `/estrutura` para aplicar os overwrites de permissão revisados. Se um contrato antigo não tiver mais controles no cartão, abra `/contratos`, filtre o estado, clique no código do contrato e use **Sincronizar anúncio**. Depois, o botão **Detalhes / atualizar** fica disponível no anúncio em qualquer estado.
 
 ## Variáveis protegidas
 

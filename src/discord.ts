@@ -10,6 +10,7 @@ import {
   ChannelType,
   ModalBuilder,
   ModalSubmitInteraction,
+  type Message,
   PermissionFlagsBits,
   REST,
   Routes,
@@ -355,8 +356,35 @@ function participantSummary(participants: Awaited<ReturnType<typeof listParticip
   return lines.join("\n");
 }
 
-function isContractMessage(message: { author: { id: string }; embeds: readonly { footer?: { text?: string | null } | null }[] }, code: string, botId: string): boolean {
-  return message.author.id === botId && message.embeds.some((embed) => embed.footer?.text === `Registro da Companhia  •  ${code}`);
+function isContractMessage(
+  message: { author: { id: string }; embeds: readonly { footer?: { text?: string | null } | null; title?: string | null }[] },
+  code: string,
+  botId: string,
+): boolean {
+  if (message.author.id !== botId) return false;
+  return message.embeds.some((embed) =>
+    embed.footer?.text?.trim().endsWith(code) === true || embed.title?.startsWith(`${code}  •`) === true,
+  );
+}
+
+async function findContractMessages(channel: Extract<Channel, { type: ChannelType.GuildText }>, contract: Contract, botId: string): Promise<Message[]> {
+  const matches: Message[] = [];
+  const notBefore = contract.createdAt.getTime() - 5 * 60 * 1000;
+  let before: string | undefined;
+  for (let page = 0; page < 100; page += 1) {
+    const batch = await channel.messages.fetch({ limit: 100, ...(before ? { before } : {}) }).catch((error) => {
+      console.warn(`Não foi possível buscar o histórico de #${channel.name} para ${contract.code}`, error);
+      return null;
+    });
+    if (!batch?.size) break;
+    matches.push(...[...batch.values()].filter((message) => isContractMessage(message, contract.code, botId)));
+    const oldest = [...batch.values()].reduce((oldestMessage, message) =>
+      message.createdTimestamp < oldestMessage.createdTimestamp ? message : oldestMessage,
+    );
+    if (batch.size < 100 || oldest.createdTimestamp < notBefore) break;
+    before = oldest.id;
+  }
+  return matches;
 }
 
 async function upsertContractThread(guild: Guild, contract: Contract, embed: EmbedBuilder): Promise<void> {
@@ -379,22 +407,26 @@ async function upsertContractThread(guild: Guild, contract: Contract, embed: Emb
   }
 }
 
-async function announceContractState(guild: Guild, config: GuildConfig, contract: Contract): Promise<void> {
+async function announceContractState(guild: Guild, config: GuildConfig, contract: Contract): Promise<string | null> {
   const botId = guild.client.user?.id;
-  if (!botId) return;
+  if (!botId) return "O bot ainda não está conectado; o anúncio não foi atualizado.";
   const participants = await listParticipants(guild.id, contract.id);
   const embed = contractEmbed(contract, participantSummary(participants));
-  const components = contract.status === "available"
-    ? [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(`contract:apply:${contract.id}`).setLabel("Tenho interesse").setEmoji("🪶").setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId(`contract:view:${contract.id}`).setLabel("Ver detalhes").setEmoji("📜").setStyle(ButtonStyle.Secondary))]
-    : [];
-  const target = guild.channels.cache.get(config.channelIds[statusChannelKeys[contract.status]]);
+  const announcementButtons = new ActionRowBuilder<ButtonBuilder>();
+  if (contract.status === "available") {
+    announcementButtons.addComponents(new ButtonBuilder().setCustomId(`contract:apply:${contract.id}`).setLabel("Tenho interesse").setEmoji("🪶").setStyle(ButtonStyle.Success));
+  }
+  // O botão permanece nos estados aceito/em andamento/concluído para reabrir os controles efêmeros.
+  announcementButtons.addComponents(new ButtonBuilder().setCustomId(`contract:view:${contract.id}`).setLabel("Detalhes / atualizar").setEmoji("📜").setStyle(ButtonStyle.Secondary));
+  const components = [announcementButtons];
+  const target = await guild.channels.fetch(config.channelIds[statusChannelKeys[contract.status]]).catch(() => null);
   const targetChannel = isTextChannel(target) ? target : undefined;
 
   let announcement;
   let announcementPersisted = false;
   let announcementChannel: Extract<Channel, { type: ChannelType.GuildText }> | undefined;
   if (contract.announcementChannelId && contract.announcementMessageId) {
-    const savedChannel = guild.channels.cache.get(contract.announcementChannelId);
+    const savedChannel = await guild.channels.fetch(contract.announcementChannelId).catch(() => null);
     if (isTextChannel(savedChannel)) {
       announcementChannel = savedChannel;
       try {
@@ -407,64 +439,81 @@ async function announceContractState(guild: Guild, config: GuildConfig, contract
   }
 
   // Contratos publicados antes desta correção não possuem os IDs salvos; localizar e reaproveitar o cartão original.
+  const failedDuplicateDeletes: string[] = [];
   if (!announcement) {
-    const legacyChannels = [...new Set([config.channelIds.contratos, config.channelIds.arquivo])]
-      .map((id) => guild.channels.cache.get(id))
-      .filter(isTextChannel);
+    const legacyChannelIds = [...new Set([config.channelIds.contratos, config.channelIds.arquivo, contract.announcementChannelId ?? ""])].filter(Boolean);
+    const legacyChannels = (await Promise.all(legacyChannelIds.map((id) => guild.channels.fetch(id).catch(() => null)))).filter(isTextChannel);
     const legacyMatches = [];
     for (const channel of legacyChannels) {
-      const recent = await channel.messages.fetch({ limit: 100 }).catch(() => null);
-      if (!recent) continue;
-      legacyMatches.push(...[...recent.values()].filter((message) => isContractMessage(message, contract.code, botId)));
+      legacyMatches.push(...await findContractMessages(channel, contract, botId));
     }
     legacyMatches.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
     if (legacyMatches[0]) {
       announcement = legacyMatches[0];
-      const foundChannel = guild.channels.cache.get(announcement.channelId);
+      const foundChannel = await guild.channels.fetch(announcement.channelId).catch(() => null);
       if (isTextChannel(foundChannel)) announcementChannel = foundChannel;
-      for (const duplicate of legacyMatches.slice(1)) await duplicate.delete().catch(() => undefined);
+      for (const duplicate of legacyMatches.slice(1)) {
+        await duplicate.delete().catch((error) => {
+          failedDuplicateDeletes.push(duplicate.channelId);
+          console.warn(`Não foi possível remover cópia do anúncio ${contract.code} (${duplicate.id})`, error);
+        });
+      }
     }
   }
 
   // Mesmo com um ID persistido, limpar cartões deixados em outro canal por uma falha ao mover.
   if (announcement) {
-    const channels = [...new Set([config.channelIds.contratos, config.channelIds.arquivo])]
-      .map((id) => guild.channels.cache.get(id))
-      .filter(isTextChannel);
+    const channelIds = [...new Set([config.channelIds.contratos, config.channelIds.arquivo, announcementChannel?.id ?? ""])].filter(Boolean);
+    const channels = (await Promise.all(channelIds.map((id) => guild.channels.fetch(id).catch(() => null)))).filter(isTextChannel);
     for (const channel of channels) {
-      const recent = await channel.messages.fetch({ limit: 100 }).catch(() => null);
-      if (!recent) continue;
-      for (const duplicate of recent.values()) {
-        if (duplicate.id !== announcement.id && isContractMessage(duplicate, contract.code, botId)) {
-          await duplicate.delete().catch(() => undefined);
-        }
+      const duplicates = await findContractMessages(channel, contract, botId);
+      for (const duplicate of duplicates) {
+        if (duplicate.id === announcement.id) continue;
+        await duplicate.delete().catch((error) => {
+          failedDuplicateDeletes.push(channel.id);
+          console.warn(`Não foi possível remover cópia do anúncio ${contract.code} (${duplicate.id})`, error);
+        });
       }
     }
   }
 
+  let moveWarning: string | null = announcement && announcementChannel && !targetChannel
+    ? `O canal de destino (${STATUS_LABELS[contract.status]}) não foi encontrado; mantive o cartão em <#${announcementChannel.id}>.`
+    : null;
   if (announcement && announcementChannel && targetChannel && announcementChannel.id !== targetChannel.id) {
+    const moved = await targetChannel.send({ embeds: [embed], components });
     try {
-      const moved = await targetChannel.send({ embeds: [embed], components });
-      try {
-        await setContractAnnouncement(guild.id, contract.id, targetChannel.id, moved.id);
-      } catch (error) {
-        await moved.delete().catch(() => undefined);
-        throw error;
-      }
+      await setContractAnnouncement(guild.id, contract.id, targetChannel.id, moved.id);
       announcementPersisted = true;
-      await announcement.delete().catch(() => undefined);
-      announcement = moved;
-      announcementChannel = targetChannel;
-    } catch {
-      // Se não for possível publicar no canal de destino, conserva e atualiza o cartão original.
+    } catch (error) {
+      const removedTemporary = await moved.delete().then(() => true).catch((cleanupError) => {
+        console.error(`Falha ao remover anúncio temporário ${moved.id}`, cleanupError);
+        return false;
+      });
+      await announcement.edit({ embeds: [embed], components });
+      if (!announcementPersisted) await setContractAnnouncement(guild.id, contract.id, announcementChannel.id, announcement.id);
+      console.error(`Falha ao salvar referência do anúncio ${contract.code}`, error);
+      moveWarning = `O status foi atualizado, mas não consegui mover o cartão para <#${targetChannel.id}>; mantive o original em <#${announcementChannel.id}>.${removedTemporary ? "" : ` A cópia em <#${targetChannel.id}> pode não ter sido removida; confira a permissão Gerenciar mensagens.`}`;
+    }
+    if (!moveWarning) {
       try {
+        await announcement.delete();
+        announcement = moved;
+        announcementChannel = targetChannel;
+      } catch (error) {
+        console.error(`Falha ao remover o anúncio antigo ${announcement.id} de ${announcementChannel.id}`, error);
+        // Não deixa dois cartões: se não for possível apagar o original, remove a cópia e mantém o original editado.
+        const removedCopy = await moved.delete().then(() => true).catch((cleanupError) => {
+          console.error(`Falha ao remover a cópia ${moved.id}; podem existir dois anúncios`, cleanupError);
+          return false;
+        });
         await announcement.edit({ embeds: [embed], components });
-        if (!announcementPersisted) {
-          await setContractAnnouncement(guild.id, contract.id, announcementChannel.id, announcement.id);
-          announcementPersisted = true;
+        await setContractAnnouncement(guild.id, contract.id, announcementChannel.id, announcement.id);
+        if (!removedCopy) {
+          moveWarning = `Não consegui remover o anúncio antigo de <#${announcementChannel.id}> nem a cópia em <#${targetChannel.id}>. Verifique a permissão Gerenciar mensagens do bot.`;
+        } else {
+          moveWarning = `O status foi atualizado no anúncio original em <#${announcementChannel.id}>, mas o bot não conseguiu movê-lo para <#${targetChannel.id}>. Verifique a permissão Gerenciar mensagens.`;
         }
-      } catch {
-        announcement = undefined;
       }
     }
   } else if (announcement && announcementChannel) {
@@ -474,12 +523,13 @@ async function announceContractState(guild: Guild, config: GuildConfig, contract
         await setContractAnnouncement(guild.id, contract.id, announcementChannel.id, announcement.id);
         announcementPersisted = true;
       }
-    } catch {
-      announcement = undefined;
+    } catch (error) {
+      console.error(`Falha ao editar anúncio ${contract.code} (${announcement.id})`, error);
+      throw new Error(`Não consegui editar o anúncio original de ${contract.code} em <#${announcementChannel.id}>. Confira as permissões de visualizar canal e enviar/gerenciar mensagens.`);
     }
   }
   if (!announcement) {
-    if (!targetChannel) return;
+    if (!targetChannel) return `Não encontrei o canal de destino do status ${STATUS_LABELS[contract.status]}; o anúncio existente não foi recriado.`;
     const sent = await targetChannel.send({ embeds: [embed], components });
     try {
       await setContractAnnouncement(guild.id, contract.id, targetChannel.id, sent.id);
@@ -491,6 +541,21 @@ async function announceContractState(guild: Guild, config: GuildConfig, contract
   }
 
   await upsertContractThread(guild, contract, embed);
+  if (failedDuplicateDeletes.length) {
+    const duplicateWarning = `Não consegui apagar todas as cópias do anúncio em <#${[...new Set(failedDuplicateDeletes)].join(">, <#")}>. Confira a permissão Gerenciar mensagens.`;
+    moveWarning = [moveWarning, duplicateWarning].filter(Boolean).join(" ");
+  }
+  return moveWarning;
+}
+
+async function syncContractAnnouncement(guild: Guild, config: GuildConfig, contract: Contract): Promise<string | null> {
+  try {
+    return await announceContractState(guild, config, contract);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "erro não identificado";
+    console.error(`Contrato ${contract.code} foi salvo, mas o anúncio falhou ao sincronizar`, error);
+    return `O contrato foi salvo, mas o anúncio não sincronizou: ${detail}. Não repita a operação; peça a um administrador para verificar as permissões e atualizar o cartão.`;
+  }
 }
 
 async function contractDetail(interaction: ButtonInteraction, id: number): Promise<unknown> {
@@ -500,6 +565,7 @@ async function contractDetail(interaction: ButtonInteraction, id: number): Promi
   const participants = await listParticipants(interaction.guildId!, id);
   const applicants = await listApplicants(interaction.guildId!, id);
   const participantText = participantSummary(participants);
+  const manager = await canManage(interaction);
   const transitions: Record<ContractStatus, ContractStatus[]> = {
     available: ["accepted", "cancelled"],
     accepted: ["in_progress", "cancelled"],
@@ -509,7 +575,7 @@ async function contractDetail(interaction: ButtonInteraction, id: number): Promi
     archived: [],
   };
   const rows: ActionRowBuilder<ButtonBuilder | UserSelectMenuBuilder | StringSelectMenuBuilder>[] = [];
-  if (transitions[contract.status].length) {
+  if (manager && transitions[contract.status].length) {
     rows.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId(`contract:status:${id}`)
@@ -517,21 +583,24 @@ async function contractDetail(interaction: ButtonInteraction, id: number): Promi
         .addOptions(statusOptions.filter((option) => transitions[contract.status].includes(option.value as ContractStatus))),
     ));
   }
-  if (contract.paymentStatus === "pending") {
+  if (manager && contract.paymentStatus === "pending") {
     rows.push(new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(
       new UserSelectMenuBuilder().setCustomId(`contract:participants:${id}`).setPlaceholder("👥 Montar equipe da missão").setMinValues(1).setMaxValues(10),
     ));
   }
   const pending = applicants.filter((applicant) => applicant.status === "pending").slice(0, 5);
-  if (pending.length && contract.status === "available" && await canManage(interaction)) {
+  if (pending.length && contract.status === "available" && manager) {
     rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(...pending.map((applicant) => new ButtonBuilder().setCustomId(`contract:appapprove:${id}:${applicant.id}`).setLabel(`Aprovar ${applicant.displayName.slice(0, 12)}`).setEmoji("✅").setStyle(ButtonStyle.Success))));
   }
   const buttons = new ActionRowBuilder<ButtonBuilder>();
-  if (contract.status === "completed" && contract.paymentStatus === "pending") {
+  if (manager && contract.status === "completed" && contract.paymentStatus === "pending") {
     buttons.addComponents(new ButtonBuilder().setCustomId(`contract:pay:${id}`).setLabel("Lançar pagamento").setEmoji(ICONS.coin).setStyle(ButtonStyle.Success));
   }
-  if (transitions[contract.status].includes("archived")) {
+  if (manager && transitions[contract.status].includes("archived")) {
     buttons.addComponents(new ButtonBuilder().setCustomId(`contract:archive:${id}`).setLabel("Arquivar registro").setEmoji("📦").setStyle(ButtonStyle.Secondary));
+  }
+  if (manager) {
+    buttons.addComponents(new ButtonBuilder().setCustomId(`contract:sync:${id}`).setLabel("Sincronizar anúncio").setEmoji("🔄").setStyle(ButtonStyle.Secondary));
   }
   if (buttons.components.length) rows.push(buttons);
   await interaction.editReply({ embeds: [contractEmbed(contract, participantText)], components: rows });
@@ -728,8 +797,8 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown
       const thread = await contractChannel.threads.create({ name: `${contract.code} — ${contract.title}`.slice(0, 100), autoArchiveDuration: 10080, reason: "Tópico de contrato" });
       await setContractThread(interaction.guildId!, contract.id, thread.id);
       await thread.send({ embeds: [contractEmbed(contract)] });
-      await announceContractState(interaction.guild, config, contract);
-      await interaction.editReply(`Contrato ${contract.code} criado. Tópico: ${thread}`);
+      const syncWarning = await syncContractAnnouncement(interaction.guild, config, contract);
+      await interaction.editReply(`Contrato ${contract.code} criado. Tópico: ${thread}${syncWarning ? `\n⚠️ ${syncWarning}` : ""}`);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "falha não identificada";
       await interaction.editReply(createdContract
@@ -751,12 +820,13 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown
         note: interaction.fields.getTextInputValue("note") || "Sem observação.",
       });
       const contract = await getContract(interaction.guildId!, id);
+      let syncWarning: string | null = null;
       if (contract) {
-        await announceContractState(interaction.guild, await getGuildConfig(interaction.guildId!), contract);
+        syncWarning = await syncContractAnnouncement(interaction.guild, await getGuildConfig(interaction.guildId!), contract);
       }
       const financeChannel = interaction.guild.channels.cache.get((await getGuildConfig(interaction.guildId!)).channelIds["caixa-guilda"]);
       if (financeChannel) await upsertFinanceMessage(financeChannel, interaction.guildId!);
-      await interaction.editReply(`Pagamento lançado. ${money(payment.totalAmount)} distribuídos entre ${payment.participantsCount} participante(s).`);
+      await interaction.editReply(`Pagamento lançado. ${money(payment.totalAmount)} distribuídos entre ${payment.participantsCount} participante(s).${syncWarning ? `\n⚠️ ${syncWarning}` : ""}`);
     } catch (error) {
       await interaction.editReply(error instanceof Error ? error.message : "Não foi possível lançar o pagamento.");
     }
@@ -825,16 +895,26 @@ async function handleButton(interaction: ButtonInteraction): Promise<unknown> {
     const [, , contractId, applicantId] = interaction.customId.split(":");
     try {
       const applicant = await setApplicantStatus(interaction.guildId!, Number(contractId), Number(applicantId), "approved");
+      let syncWarning: string | null = null;
       if (applicant) {
         const updatedContract = await getContract(interaction.guildId!, Number(contractId));
-        if (updatedContract) await announceContractState(interaction.guild!, await getGuildConfig(interaction.guildId!), updatedContract);
+        if (updatedContract) syncWarning = await syncContractAnnouncement(interaction.guild!, await getGuildConfig(interaction.guildId!), updatedContract);
       }
-      return interaction.editReply(applicant ? `✅ ${applicant.displayName} foi aprovado na equipe.` : "Interessado não encontrado.");
+      return interaction.editReply(applicant ? `✅ ${applicant.displayName} foi aprovado na equipe.${syncWarning ? `\n⚠️ ${syncWarning}` : ""}` : "Interessado não encontrado.");
     } catch (error) {
       return interaction.editReply(error instanceof Error ? error.message : "Não foi possível aprovar o interessado.");
     }
   }
   if (interaction.customId.startsWith("contract:view:")) return contractDetail(interaction, Number(interaction.customId.split(":")[2]));
+  if (interaction.customId.startsWith("contract:sync:")) {
+    if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem sincronizar anúncios.", ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    const id = Number(interaction.customId.split(":")[2]);
+    const contract = await getContract(interaction.guildId!, id);
+    if (!contract) return interaction.editReply("Contrato não encontrado.");
+    const warning = await syncContractAnnouncement(interaction.guild!, await getGuildConfig(interaction.guildId!), contract);
+    return interaction.editReply(warning ? `Sincronização concluída com aviso: ${warning}` : `Anúncio de ${contract.code} sincronizado. O cartão original foi reaproveitado; se o estado exigir arquivo, o cartão foi movido e a cópia anterior removida.`);
+  }
   if (interaction.customId.startsWith("contract:pay:")) {
     if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem registrar pagamentos.", ephemeral: true });
     return paymentModal(interaction, Number(interaction.customId.split(":")[2]));
@@ -844,8 +924,8 @@ async function handleButton(interaction: ButtonInteraction): Promise<unknown> {
     await interaction.deferUpdate();
     const id = Number(interaction.customId.split(":")[2]);
     const contract = await setContractStatus(interaction.guildId!, id, "archived");
-    if (contract) await announceContractState(interaction.guild!, await getGuildConfig(interaction.guildId!), contract);
-    return interaction.editReply({ content: contract ? `${contract.code} arquivado.` : "Contrato não encontrado.", embeds: [], components: [] });
+    const syncWarning = contract ? await syncContractAnnouncement(interaction.guild!, await getGuildConfig(interaction.guildId!), contract) : null;
+    return interaction.editReply({ content: `${contract ? `${contract.code} arquivado.` : "Contrato não encontrado."}${syncWarning ? `\n⚠️ ${syncWarning}` : ""}`, embeds: [], components: [] });
   }
 }
 
@@ -860,11 +940,9 @@ async function handleSelect(interaction: StringSelectMenuInteraction | UserSelec
     const id = Number(interaction.customId.split(":")[2]);
     const status = interaction.values[0] as ContractStatus;
     const contract = await setContractStatus(interaction.guildId!, id, status);
-    if (contract) {
-      await announceContractState(interaction.guild!, await getGuildConfig(interaction.guildId!), contract);
-    }
+    const syncWarning = contract ? await syncContractAnnouncement(interaction.guild!, await getGuildConfig(interaction.guildId!), contract) : null;
     return interaction.editReply({
-      content: contract ? `${contract.code} agora está ${STATUS_LABELS[status].toLowerCase()}.` : "Contrato não encontrado.",
+      content: `${contract ? `${contract.code} agora está ${STATUS_LABELS[status].toLowerCase()}.` : "Contrato não encontrado."}${syncWarning ? `\n⚠️ ${syncWarning}` : ""}`,
       embeds: [],
       components: [],
     });
@@ -878,8 +956,9 @@ async function handleSelect(interaction: StringSelectMenuInteraction | UserSelec
     const contract = await getContract(interaction.guildId!, id);
     if (!contract) return interaction.editReply({ content: "Contrato não encontrado.", embeds: [], components: [] });
     const participants = await listParticipants(interaction.guildId!, id);
-    await announceContractState(interaction.guild!, await getGuildConfig(interaction.guildId!), contract);
+    const syncWarning = await syncContractAnnouncement(interaction.guild!, await getGuildConfig(interaction.guildId!), contract);
     return interaction.editReply({
+      content: syncWarning ? `⚠️ ${syncWarning}` : "",
       embeds: [contractEmbed(contract, participantSummary(participants))],
       components: interaction.message.components,
     });

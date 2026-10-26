@@ -32,3 +32,16 @@ Foram feitas três revisões independentes e uma consolidação. O projeto tinha
 - Verificação automatizada: o SQL contém todas as oito tabelas requeridas pelo código e se divide corretamente em oito instruções `CREATE TABLE`.
 - Teste local de `/health` sem `DATABASE_URL` nem token Discord: o processo abriu o endpoint e respondeu JSON com estado `database: false`, HTTP 503. Isso confirma que a rota responde antes das dependências; não substitui teste com banco pronto nem prova o comportamento do Discord.
 - O arquivo SQL espelhado na raiz deve permanecer idêntico a `sql/001_init.sql`.
+
+
+## Correção adicional solicitada em 25/10/2026
+
+O relato confirmou dois defeitos ainda presentes na versão anterior: os controles do anúncio eram removidos quando o contrato deixava de estar `available`, impedindo abrir as próximas transições; e o erro ao excluir o cartão na movimentação para arquivo era silenciado, podendo deixar o cartão antigo no canal de contratos sem aviso.
+
+- Agora o botão **Detalhes / atualizar** permanece no cartão em qualquer estado; os gerentes podem abrir o contrato e avançar de `accepted` para `in_progress` e daí para os próximos estados.
+- O painel de detalhes só mostra controles mutáveis a gerentes/administradores e ganhou **Sincronizar anúncio**, acessível pela listagem `/contratos`, para reparar anúncios legados e remover cópias.
+- A busca de cartões antigos passou a paginar o histórico dos canais relevantes (até 10.000 mensagens por canal, interrompendo ao chegar antes da data de criação do contrato) em vez de olhar apenas as últimas 100 mensagens. A identificação usa ID do bot e código do contrato no rodapé/título para localizar o cartão original.
+- Ao mudar para o canal de arquivo, o bot agora verifica explicitamente se conseguiu excluir a mensagem de origem. Se não conseguir, remove a cópia nova e mantém a mensagem antiga atualizada; se qualquer limpeza falhar, registra e mostra um aviso em vez de ocultar o erro. Também atualiza a mensagem privada de retorno de status/equipe/pagamento para que a falha de sincronização não sugira repetir um pagamento ou criar novo contrato.
+- O README agora explica que o Discord não permite mover uma mensagem entre canais preservando o mesmo ID: arquivar exige publicar no canal de arquivo e apagar a antiga. Inclui também a permissão necessária e instruções de sincronização de cartões antigos.
+
+**Limitação de verificação:** o typecheck pode validar a compilação, mas só um teste no servidor Discord do usuário confirma os overwrites/role permissions reais e a movimentação dos anúncios existentes. Se a permissão para apagar mensagens faltar, a própria resposta do bot agora deve apontar a falha e o canal correspondente.
