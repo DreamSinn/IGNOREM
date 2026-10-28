@@ -1,5 +1,6 @@
 import {
   ActionRowBuilder,
+  ApplicationCommandOptionType,
   ButtonBuilder,
   ButtonStyle,
   ChatInputCommandInteraction,
@@ -18,6 +19,7 @@ import {
   TextInputBuilder,
   TextInputStyle,
   UserSelectMenuBuilder,
+  type AutocompleteInteraction,
   type ButtonInteraction,
   type Channel,
   type Interaction,
@@ -31,6 +33,8 @@ import {
   ensureGuildFinance,
   ensureGuildConfig,
   getContract,
+  getContractByCode,
+  listContractsForUser,
   getGuildConfig,
   getGuildFinance,
   getPayment,
@@ -90,13 +94,30 @@ const statusOptions = Object.entries(STATUS_LABELS).map(([value, label]) => ({
   description: `Mover o contrato para: ${label.toLowerCase()}`,
 }));
 
+const NEXT_STATUS: Partial<Record<ContractStatus, { status: ContractStatus; label: string; emoji: string }>> = {
+  available: { status: "accepted", label: "Aceitar contrato", emoji: "✅" },
+  accepted: { status: "in_progress", label: "Iniciar missão", emoji: "🚩" },
+  in_progress: { status: "completed", label: "Concluir missão", emoji: "🏁" },
+};
+
+const LEGACY_CATEGORY_NAME = "𝗖𝗢𝗠𝗣𝗔𝗡𝗛𝗜𝗔";
 const categorySpecs = [
-  { key: "companhia", name: "𝗖𝗢𝗠𝗣𝗔𝗡𝗛𝗜𝗔", channels: [
+  { key: "comando", name: "⚔️・𝗖𝗢𝗠𝗔𝗡𝗗𝗢", channels: [
     { key: "painel-configuracao", name: "🔒・𝗣𝗮𝗶𝗻𝗲𝗹", type: "text" },
+  ] },
+  { key: "contratos", name: "📜・𝗖𝗢𝗡𝗧𝗥𝗔𝗧𝗢𝗦", channels: [
     { key: "contratos", name: "📜・𝗖𝗼𝗻𝘁𝗿𝗮𝘁𝗼𝘀", type: "text" },
-    { key: "chat-geral", name: "💬・𝗖𝗵𝗮𝘁-𝗚𝗲𝗿𝗮𝗹", type: "text" },
     { key: "arquivo", name: "🗃️・𝗔𝗿𝗾𝘂𝗶𝘃𝗼", type: "text" },
+  ] },
+  { key: "financas", name: "💰・𝗙𝗜𝗡𝗔𝗡Ç𝗔𝗦", channels: [
     { key: "caixa-guilda", name: "💰・𝗖𝗮𝗶𝘅𝗮-𝗱𝗮-𝗚𝘂𝗶𝗹𝗱𝗮", type: "text" },
+  ] },
+  { key: "operacoes", name: "🏕️・𝗢𝗣𝗘𝗥𝗔Ç𝗢𝗘𝗦", channels: [
+    { key: "chat-geral", name: "💬・𝗖𝗵𝗮𝘁-𝗚𝗲𝗿𝗮𝗹", type: "text" },
+    { key: "sala-operacoes", name: "🔊・Sala-de-Operações", type: "voice" },
+  ] },
+  { key: "configuracao", name: "🛠️・𝗖𝗢𝗡𝗙𝗜𝗚", channels: [
+    { key: "auditoria", name: "🧾・𝗔𝘂𝗱𝗶𝘁𝗼𝗿𝗶𝗮", type: "text" },
   ] },
 ] as const;
 
@@ -149,6 +170,38 @@ function parseMoney(value: string): number {
   return Math.round(parsed * 100) / 100;
 }
 
+async function audit(guild: Guild, message: string): Promise<void> {
+  try {
+    const config = await getGuildConfig(guild.id);
+    const id = config.channelIds.auditoria;
+    if (!id) return;
+    const channel = await guild.channels.fetch(id).catch(() => null);
+    if (isTextChannel(channel)) {
+      await channel.send({ embeds: [new EmbedBuilder().setColor(COLORS.steel).setDescription(message).setTimestamp()] });
+    }
+  } catch (error) {
+    console.warn("Não foi possível registrar a auditoria", error);
+  }
+}
+
+async function notifyUsers(client: Client, notices: Array<{ userId: string; text: string }>): Promise<void> {
+  await Promise.all(notices.map(async ({ userId, text }) => {
+    try {
+      const user = await client.users.fetch(userId);
+      await user.send(text);
+    } catch {
+      // Participante com mensagens privadas fechadas: o cartão do contrato continua sendo a fonte oficial.
+    }
+  }));
+}
+
+const PROGRESS_STEPS: ContractStatus[] = ["available", "accepted", "in_progress", "completed", "archived"];
+function progressText(status: ContractStatus): string {
+  if (status === "cancelled") return "✖ Cancelado";
+  const filled = PROGRESS_STEPS.indexOf(status) + 1;
+  return `${"▰".repeat(filled)}${"▱".repeat(PROGRESS_STEPS.length - filled)}  ${filled}/${PROGRESS_STEPS.length}`;
+}
+
 function parseRoleIds(value: string): string[] {
   return [...new Set(value.split(/[\s,;]+/).map((part) => part.replace(/[<@&>]/g, "").trim()).filter(Boolean))];
 }
@@ -188,7 +241,6 @@ function panelComponents(): ActionRowBuilder<ButtonBuilder>[] {
     ),
     new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId("panel:clear-chat").setLabel("Limpar chat atual").setEmoji("🧹").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId("panel:wipe-server").setLabel("Apagar canais do servidor").setEmoji("⚠️").setStyle(ButtonStyle.Danger),
     ),
   ];
 }
@@ -201,8 +253,9 @@ async function findOrCreateCategory(guild: Guild, name: string): Promise<Extract
 
 async function findOrCreateChannel(guild: Guild, name: string, type: "text" | "voice", parentId: string, topic?: string): Promise<Channel> {
   const channelType = type === "text" ? ChannelType.GuildText : ChannelType.GuildVoice;
-  const existing = guild.channels.cache.find((channel) => channel.type === channelType && channel.name === name && channel.parentId === parentId);
+  const existing = guild.channels.cache.find((channel) => channel.type === channelType && channel.name === name);
   if (existing) {
+    if (existing.parentId !== parentId && "setParent" in existing) await existing.setParent(parentId, { lockPermissions: false });
     if (type === "text" && isTextChannel(existing) && topic && existing.topic !== topic) await existing.setTopic(topic);
     return existing;
   }
@@ -235,6 +288,14 @@ async function syncOperationalPermissions(guild: Guild, config: GuildConfig): Pr
   const arquivo = guild.channels.cache.get(config.channelIds.arquivo);
   if (caixa && caixa.isTextBased() && "permissionOverwrites" in caixa) await caixa.permissionOverwrites.set(readOnly, "Caixa somente leitura");
   if (arquivo && arquivo.isTextBased() && "permissionOverwrites" in arquivo) await arquivo.permissionOverwrites.set(readOnly, "Arquivo somente leitura");
+  const audit = guild.channels.cache.get(config.channelIds.auditoria);
+  if (audit && isTextChannel(audit)) {
+    await audit.permissionOverwrites.set([
+      { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+      { id: guild.client.user?.id ?? "", allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks, PermissionFlagsBits.ReadMessageHistory] },
+      ...adminIds.map((id) => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory], deny: [PermissionFlagsBits.SendMessages] })),
+    ].filter((entry) => entry.id), "Auditoria restrita a gerentes e administradores");
+  }
 }
 
 function financeEmbed(finance: Awaited<ReturnType<typeof getGuildFinance>>): EmbedBuilder {
@@ -289,6 +350,11 @@ export async function provisionGuildStructure(guild: Guild): Promise<GuildConfig
       channelIds[channelSpec.key] = channel.id;
     }
   }
+  // Remove a categoria da versão anterior quando ela ficou vazia após a reorganização.
+  const legacy = guild.channels.cache.find((channel) => channel.type === ChannelType.GuildCategory && channel.name === LEGACY_CATEGORY_NAME);
+  if (legacy && !guild.channels.cache.some((channel) => channel.parentId === legacy.id)) {
+    await legacy.delete("Categoria substituída pela nova estrutura").catch((error) => console.warn("Não foi possível remover a categoria antiga", error));
+  }
   config = await setGuildStructure(guild.id, categoryIds, channelIds);
   await syncPanelPermissions(guild, config);
   await syncOperationalPermissions(guild, config);
@@ -324,6 +390,7 @@ function contractEmbed(contract: Contract, participantText = "Nenhum participant
       { name: `${ICONS.compass} Local`, value: contract.location || "Não informado", inline: true },
       { name: `${ICONS.coin} Recompensa`, value: `**${money(contract.totalValue)}**`, inline: true },
       { name: "📌 Situação", value: STATUS_LABELS[contract.status], inline: true },
+      { name: "📈 Andamento", value: progressText(contract.status), inline: true },
       { name: "💰 Pagamento", value: contract.paymentStatus === "paid" ? `${ICONS.check} Lançado` : `${ICONS.clock} Pendente`, inline: true },
       { name: `${ICONS.people} Equipe`, value: participantText, inline: false },
     )
@@ -404,6 +471,19 @@ async function upsertContractThread(guild: Guild, contract: Contract, embed: Emb
     }
   } catch (error) {
     console.warn(`Não foi possível atualizar o tópico de ${contract.code}`, error);
+  }
+}
+
+async function closeContractThread(guild: Guild, contract: Contract): Promise<string | null> {
+  if (!contract.threadId) return null;
+  try {
+    const thread = await guild.channels.fetch(contract.threadId);
+    if (thread?.isThread()) await thread.delete(`Contrato ${contract.code} encerrado`);
+    await setContractThread(guild.id, contract.id, null);
+    return null;
+  } catch (error) {
+    console.warn(`Não foi possível excluir o tópico de ${contract.code}`, error);
+    return `Não consegui excluir o tópico <#${contract.threadId}>. Verifique a permissão **Gerenciar tópicos** do bot.`;
   }
 }
 
@@ -540,12 +620,14 @@ async function announceContractState(guild: Guild, config: GuildConfig, contract
     }
   }
 
-  await upsertContractThread(guild, contract, embed);
+  const closedThreadWarning = ["completed", "cancelled", "archived"].includes(contract.status)
+    ? await closeContractThread(guild, contract)
+    : null;
   if (failedDuplicateDeletes.length) {
     const duplicateWarning = `Não consegui apagar todas as cópias do anúncio em <#${[...new Set(failedDuplicateDeletes)].join(">, <#")}>. Confira a permissão Gerenciar mensagens.`;
     moveWarning = [moveWarning, duplicateWarning].filter(Boolean).join(" ");
   }
-  return moveWarning;
+  return [moveWarning, closedThreadWarning].filter(Boolean).join(" ") || null;
 }
 
 async function syncContractAnnouncement(guild: Guild, config: GuildConfig, contract: Contract): Promise<string | null> {
@@ -558,7 +640,7 @@ async function syncContractAnnouncement(guild: Guild, config: GuildConfig, contr
   }
 }
 
-async function contractDetail(interaction: ButtonInteraction, id: number): Promise<unknown> {
+async function contractDetail(interaction: ButtonInteraction | ChatInputCommandInteraction, id: number): Promise<unknown> {
   await interaction.deferReply({ ephemeral: true });
   const contract = await getContract(interaction.guildId!, id);
   if (!contract) return interaction.editReply({ content: "Contrato não encontrado." });
@@ -575,12 +657,10 @@ async function contractDetail(interaction: ButtonInteraction, id: number): Promi
     archived: [],
   };
   const rows: ActionRowBuilder<ButtonBuilder | UserSelectMenuBuilder | StringSelectMenuBuilder>[] = [];
-  if (manager && transitions[contract.status].length) {
-    rows.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId(`contract:status:${id}`)
-        .setPlaceholder("📌 Alterar situação da missão")
-        .addOptions(statusOptions.filter((option) => transitions[contract.status].includes(option.value as ContractStatus))),
+  const next = NEXT_STATUS[contract.status];
+  if (manager && next) {
+    rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`contract:advance:${id}`).setLabel(next.label).setEmoji(next.emoji).setStyle(ButtonStyle.Primary),
     ));
   }
   if (manager && contract.paymentStatus === "pending") {
@@ -595,6 +675,9 @@ async function contractDetail(interaction: ButtonInteraction, id: number): Promi
   const buttons = new ActionRowBuilder<ButtonBuilder>();
   if (manager && contract.status === "completed" && contract.paymentStatus === "pending") {
     buttons.addComponents(new ButtonBuilder().setCustomId(`contract:pay:${id}`).setLabel("Lançar pagamento").setEmoji(ICONS.coin).setStyle(ButtonStyle.Success));
+  }
+  if (manager && ["available", "accepted", "in_progress"].includes(contract.status)) {
+    buttons.addComponents(new ButtonBuilder().setCustomId(`contract:cancel:${id}`).setLabel("Cancelar contrato").setEmoji("🛑").setStyle(ButtonStyle.Danger));
   }
   if (manager && transitions[contract.status].includes("archived")) {
     buttons.addComponents(new ButtonBuilder().setCustomId(`contract:archive:${id}`).setLabel("Arquivar registro").setEmoji("📦").setStyle(ButtonStyle.Secondary));
@@ -705,10 +788,10 @@ async function paymentModal(interaction: ButtonInteraction, id: number): Promise
   await interaction.showModal(modal);
 }
 
-async function maintenanceModal(interaction: ButtonInteraction, mode: "clear" | "wipe"): Promise<void> {
-  const modal = new ModalBuilder().setCustomId(`maintenance:${mode}`).setTitle(mode === "clear" ? "🧹 Limpar mensagens" : "⚠️ Apagar canais");
+async function maintenanceModal(interaction: ButtonInteraction): Promise<void> {
+  const modal = new ModalBuilder().setCustomId("maintenance:clear").setTitle("🧹 Limpar mensagens");
   modal.addComponents(
-    new ActionRowBuilder<TextInputBuilder>().addComponents(input("confirmation", mode === "clear" ? "Digite LIMPAR para confirmar" : "Digite APAGAR TUDO para confirmar", TextInputStyle.Short, true, 20)),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(input("confirmation", "Digite LIMPAR para confirmar", TextInputStyle.Short, true, 20)),
   );
   await interaction.showModal(modal);
 }
@@ -730,25 +813,11 @@ async function clearCurrentChannel(interaction: ModalSubmitInteraction): Promise
   await interaction.editReply(`🧹 Limpeza concluída. **${deleted}** mensagem(ns) removida(s).`);
 }
 
-async function wipeServer(interaction: ModalSubmitInteraction): Promise<unknown> {
-  const confirmation = interaction.fields.getTextInputValue("confirmation").trim().toUpperCase();
-  if (confirmation !== "APAGAR TUDO") return interaction.reply({ content: "Confirmação inválida. Nenhum canal foi apagado.", ephemeral: true });
-  await interaction.reply({ content: "⚠️ Exclusão iniciada. Os canais serão removidos agora.", ephemeral: true });
-  const channels = [...interaction.guild!.channels.cache.values()];
-  for (const channel of channels) {
-    try { await channel.delete("Limpeza total solicitada por administrador"); } catch (error) { console.error(`Não foi possível apagar o canal ${channel.id}`, error); }
-  }
-}
-
 async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown> {
   if (!interaction.guild) return interaction.reply({ content: "Esta ação só pode ser usada dentro de um servidor.", ephemeral: true });
   if (interaction.customId === "maintenance:clear") {
     if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem limpar mensagens.", ephemeral: true });
     return clearCurrentChannel(interaction);
-  }
-  if (interaction.customId === "maintenance:wipe") {
-    if (!hasAdministrator(interaction)) return interaction.reply({ content: "Apenas o proprietário ou Administrator pode apagar todos os canais.", ephemeral: true });
-    return wipeServer(interaction);
   }
   if (interaction.customId === "config:roles") {
     if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem alterar cargos.", ephemeral: true });
@@ -760,6 +829,7 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown
     const config = await setGuildRoles(interaction.guildId!, managerRoleIds, adminRoleIds);
     await syncPanelPermissions(interaction.guild, config);
     await syncOperationalPermissions(interaction.guild, config);
+    await audit(interaction.guild!, `🛡️ Cargos autorizados alterados por <@${interaction.user.id}>.`);
     await interaction.editReply("Cargos autorizados atualizados. O painel e os canais operacionais respeitam essa lista.");
     return;
   }
@@ -798,6 +868,7 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown
       await setContractThread(interaction.guildId!, contract.id, thread.id);
       await thread.send({ embeds: [contractEmbed(contract)] });
       const syncWarning = await syncContractAnnouncement(interaction.guild, config, contract);
+      await audit(interaction.guild, `📜 Contrato **${contract.code}** — ${contract.title} registrado por <@${interaction.user.id}>.`);
       await interaction.editReply(`Contrato ${contract.code} criado. Tópico: ${thread}${syncWarning ? `\n⚠️ ${syncWarning}` : ""}`);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "falha não identificada";
@@ -820,6 +891,9 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown
         note: interaction.fields.getTextInputValue("note") || "Sem observação.",
       });
       const contract = await getContract(interaction.guildId!, id);
+      const code = contract?.code ?? `#${id}`;
+      await audit(interaction.guild, `💰 Pagamento de **${code}** lançado por <@${interaction.user.id}>: ${money(payment.totalAmount)} entre ${payment.participantsCount} participante(s).`);
+      await notifyUsers(interaction.client, payment.items.map((item) => ({ userId: item.userId, text: `💰 Você recebeu **${money(item.amount)}** pelo contrato **${code}**.` })));
       let syncWarning: string | null = null;
       if (contract) {
         syncWarning = await syncContractAnnouncement(interaction.guild, await getGuildConfig(interaction.guildId!), contract);
@@ -861,11 +935,7 @@ async function handleButton(interaction: ButtonInteraction): Promise<unknown> {
   }
   if (interaction.customId === "panel:clear-chat") {
     if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem limpar mensagens.", ephemeral: true });
-    return maintenanceModal(interaction, "clear");
-  }
-  if (interaction.customId === "panel:wipe-server") {
-    if (!hasAdministrator(interaction)) return interaction.reply({ content: "Apenas o proprietário ou Administrator pode apagar todos os canais.", ephemeral: true });
-    return maintenanceModal(interaction, "wipe");
+    return maintenanceModal(interaction);
   }
   if (interaction.customId === "panel:new-contract") {
     if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem criar contratos.", ephemeral: true });
@@ -899,10 +969,48 @@ async function handleButton(interaction: ButtonInteraction): Promise<unknown> {
       if (applicant) {
         const updatedContract = await getContract(interaction.guildId!, Number(contractId));
         if (updatedContract) syncWarning = await syncContractAnnouncement(interaction.guild!, await getGuildConfig(interaction.guildId!), updatedContract);
+        const code = updatedContract?.code ?? `#${contractId}`;
+        await notifyUsers(interaction.client, [{ userId: applicant.userId, text: `🪶 Você foi aprovado na equipe do contrato **${code}**.` }]);
+        await audit(interaction.guild!, `✅ <@${applicant.userId}> aprovado na equipe de **${code}** por <@${interaction.user.id}>.`);
       }
       return interaction.editReply(applicant ? `✅ ${applicant.displayName} foi aprovado na equipe.${syncWarning ? `\n⚠️ ${syncWarning}` : ""}` : "Interessado não encontrado.");
     } catch (error) {
       return interaction.editReply(error instanceof Error ? error.message : "Não foi possível aprovar o interessado.");
+    }
+  }
+  if (interaction.customId.startsWith("contract:advance:")) {
+    if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem avançar contratos.", ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    const id = Number(interaction.customId.split(":")[2]);
+    try {
+      const current = await getContract(interaction.guildId!, id);
+      const next = current ? NEXT_STATUS[current.status] : undefined;
+      if (!current || !next) return interaction.editReply("Este contrato não possui uma próxima etapa.");
+      const contract = await setContractStatus(interaction.guildId!, id, next.status);
+      const syncWarning = contract ? await syncContractAnnouncement(interaction.guild!, await getGuildConfig(interaction.guildId!), contract) : null;
+      if (contract) await audit(interaction.guild!, `🔁 **${contract.code}** agora está: ${STATUS_LABELS[contract.status]} (por <@${interaction.user.id}>).`);
+      const paymentButton = contract?.status === "completed" && contract.paymentStatus === "pending"
+        ? [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(`contract:pay:${id}`).setLabel("Lançar pagamento").setEmoji(ICONS.coin).setStyle(ButtonStyle.Success))]
+        : [];
+      return interaction.editReply({
+        content: contract ? `✅ **${contract.code}** avançou para **${STATUS_LABELS[contract.status]}**.${contract.status === "completed" ? " O tópico foi excluído e o contrato foi enviado ao Arquivo." : ""}${syncWarning ? `\n⚠️ ${syncWarning}` : ""}` : "Contrato não encontrado.",
+        components: paymentButton,
+      });
+    } catch (error) {
+      return interaction.editReply(error instanceof Error ? error.message : "Não foi possível avançar o contrato.");
+    }
+  }
+  if (interaction.customId.startsWith("contract:cancel:")) {
+    if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem cancelar contratos.", ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    const id = Number(interaction.customId.split(":")[2]);
+    try {
+      const contract = await setContractStatus(interaction.guildId!, id, "cancelled");
+      const syncWarning = contract ? await syncContractAnnouncement(interaction.guild!, await getGuildConfig(interaction.guildId!), contract) : null;
+      if (contract) await audit(interaction.guild!, `🔁 **${contract.code}** agora está: ${STATUS_LABELS[contract.status]} (por <@${interaction.user.id}>).`);
+      return interaction.editReply({ content: contract ? `🛑 **${contract.code}** cancelado. O tópico foi excluído e o registro foi movido para o Arquivo.${syncWarning ? `\n⚠️ ${syncWarning}` : ""}` : "Contrato não encontrado." });
+    } catch (error) {
+      return interaction.editReply(error instanceof Error ? error.message : "Não foi possível cancelar o contrato.");
     }
   }
   if (interaction.customId.startsWith("contract:view:")) return contractDetail(interaction, Number(interaction.customId.split(":")[2]));
@@ -989,11 +1097,42 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
     if (!(await canManage(interaction))) return interaction.reply({ content: `${ICONS.lock} Apenas gerentes e administradores podem consultar pagamentos.`, ephemeral: true });
     return paymentLedger(interaction);
   }
+  if (interaction.commandName === "contrato") {
+    if (!(await canManage(interaction))) return interaction.reply({ content: `${ICONS.lock} Apenas gerentes e administradores podem abrir contratos.`, ephemeral: true });
+    const code = interaction.options.getString("codigo", true);
+    const contract = await getContractByCode(interaction.guildId!, code);
+    if (!contract) return interaction.reply({ content: "Contrato não encontrado. Escolha um código da lista sugerida.", ephemeral: true });
+    return contractDetail(interaction, contract.id);
+  }
+  if (interaction.commandName === "meus-contratos") {
+    await interaction.deferReply({ ephemeral: true });
+    const contracts = await listContractsForUser(interaction.guildId!, interaction.user.id);
+    if (!contracts.length) return interaction.editReply("Você ainda não participa de nenhuma missão registrada.");
+    const lines = contracts.slice(0, 10).map((contract) => `${STATUS_LABELS[contract.status]}  **${contract.code}** — ${contract.title}\n> ${money(contract.totalValue)}  •  pagamento: ${contract.paymentStatus === "paid" ? "lançado" : "pendente"}`);
+    const omitted = contracts.length - lines.length;
+    return interaction.editReply(`${ICONS.book} **Suas missões**\n\n${lines.join("\n\n")}${omitted > 0 ? `\n\n_E mais ${omitted} missão(ões)._` : ""}`);
+  }
   if (interaction.commandName === "estrutura") {
     if (!(await canAdmin(interaction))) return interaction.reply({ content: `${ICONS.lock} Apenas administradores autorizados podem sincronizar a estrutura.`, ephemeral: true });
     await interaction.deferReply({ ephemeral: true });
     const config = await provisionGuildStructure(interaction.guild!);
     return interaction.editReply(`${ICONS.check} Estrutura sincronizada. Painel privado: <#${config.channelIds["painel-configuracao"]}>`);
+  }
+}
+
+async function handleAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
+  if (interaction.commandName !== "contrato" || !interaction.guildId) return interaction.respond([]);
+  try {
+    const query = interaction.options.getFocused().trim().toLowerCase();
+    const contracts = await listContracts(interaction.guildId);
+    const choices = contracts
+      .filter((contract) => !query || contract.code.toLowerCase().includes(query) || contract.title.toLowerCase().includes(query))
+      .slice(0, 25)
+      .map((contract) => ({ name: `${contract.code} — ${contract.title} (${STATUS_LABELS[contract.status]})`.slice(0, 100), value: contract.code }));
+    await interaction.respond(choices);
+  } catch (error) {
+    console.warn("Falha no autocomplete de contratos", error);
+    await interaction.respond([]).catch(() => undefined);
   }
 }
 
@@ -1004,6 +1143,8 @@ export async function registerDiscord(client: Client): Promise<void> {
     { name: "novo-contrato", description: "Registrar uma nova missão no livro da Companhia" },
     { name: "pagamentos", description: "Consultar o livro-caixa e pagamentos lançados" },
     { name: "estrutura", description: "Sincronizar categorias, canais e painel privado" },
+    { name: "contrato", description: "Abrir o cartão e os controles de um contrato", options: [{ name: "codigo", description: "Código ou título do contrato", type: ApplicationCommandOptionType.String, required: true, autocomplete: true }] },
+    { name: "meus-contratos", description: "Ver as missões em que você participa" },
   ];
   const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN ?? "");
   if (process.env.DISCORD_GUILD_ID) {
@@ -1018,6 +1159,7 @@ export function attachDiscordHandlers(client: Client): void {
     try {
       if (interaction.isChatInputCommand()) await handleCommand(interaction);
       else if (interaction.isButton()) await handleButton(interaction);
+      else if (interaction.isAutocomplete()) await handleAutocomplete(interaction);
       else if (interaction.isStringSelectMenu() || interaction.isUserSelectMenu()) await handleSelect(interaction);
       else if (interaction.isModalSubmit()) await handleModal(interaction);
     } catch (error) {

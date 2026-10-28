@@ -10,12 +10,12 @@ Construir um bot instalável e hospedável para uma guilda de mercenários de RP
 - Persistência: banco MySQL gerenciado do projeto, acessado por `mysql2`; a migração é idempotente e roda na inicialização antes de aceitar operações administrativas.
 - Discord: slash command `/painel` apenas como ponto de entrada. A operação principal usa botões, menus de seleção, modais e tópicos.
 - Autorização: proprietário do servidor e membros com Administrator podem inicializar o painel; depois, os IDs dos cargos de administradores e gerentes ficam persistidos por servidor e são usados em todas as ações administrativas e financeiras.
-- Estrutura: categorias de comando, contratos, finanças, operações e configuração; canais de texto e voz são criados somente quando não existem, preservando canais existentes com os mesmos nomes.
+- Estrutura: cinco categorias (comando, contratos, finanças, operações e configuração), com canais de texto e voz; canais existentes com o mesmo nome são reaproveitados e movidos para a categoria correta. O estado atual está descrito no README.
 - Contratos: estados `available`, `accepted`, `in_progress`, `completed`, `cancelled` e `archived`; cada contrato tem um código, tópico próprio, participantes e histórico financeiro.
-- Pagamentos: ao registrar um pagamento, o bot calcula a divisão igual em centavos e distribui eventual sobra de arredondamento de forma determinística, preservando o valor total pago e cada parcela individual.
+- Pagamentos: (o código atual reserva 10% para o caixa antes da divisão; ver README e TODO) ao registrar um pagamento, o bot calcula a divisão igual em centavos e distribui eventual sobra de arredondamento de forma determinística, preservando o valor total pago e cada parcela individual.
 - Segurança: tokens e DSN somente em variáveis protegidas; não gravar segredos no repositório nem pedir token em mensagem comum.
 
-## Estrutura de arquivos
+## Estrutura de arquivos (estado atual no README)
 
 - `src/index.ts`: inicialização do banco, cliente Discord e servidor de saúde.
 - `src/db.ts`: migração idempotente, configurações de guilda, contratos, participantes e pagamentos.

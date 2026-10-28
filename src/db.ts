@@ -402,7 +402,7 @@ export async function setApplicantStatus(guildId: string, contractId: number, ap
     await connection.beginTransaction();
     const [contracts] = await connection.execute<DbRow[]>("SELECT * FROM contracts WHERE guild_id = ? AND id = ? FOR UPDATE", [guildId, contractId]);
     if (!contracts[0]) throw new Error("Contrato não encontrado.");
-    if (status === "approved" && String(contracts[0].status) !== "available") throw new Error("As inscrições para este contrato já foram encerradas.");
+    if (status === "approved" && !["available", "accepted"].includes(String(contracts[0].status))) throw new Error("As inscrições para este contrato já foram encerradas.");
     if (String(contracts[0].payment_status) === "paid") throw new Error("A equipe não pode ser alterada depois que o pagamento foi registrado.");
     const [applicants] = await connection.execute<DbRow[]>(
       "SELECT * FROM contract_applicants WHERE guild_id = ? AND contract_id = ? AND id = ? FOR UPDATE",
@@ -418,6 +418,9 @@ export async function setApplicantStatus(guildId: string, contractId: number, ap
          ON DUPLICATE KEY UPDATE display_name = VALUES(display_name)`,
         [contractId, guildId, applicants[0].user_id, applicants[0].display_name],
       );
+      if (String(contracts[0].status) === "available") {
+        await connection.execute("UPDATE contracts SET status = 'accepted' WHERE guild_id = ? AND id = ?", [guildId, contractId]);
+      }
     }
     const [updated] = await connection.execute<DbRow[]>("SELECT * FROM contract_applicants WHERE guild_id = ? AND contract_id = ? AND id = ? LIMIT 1", [guildId, contractId, applicantId]);
     await connection.commit();
@@ -466,7 +469,7 @@ export async function createContract(input: {
   }
 }
 
-export async function setContractThread(guildId: string, id: number, threadId: string): Promise<void> {
+export async function setContractThread(guildId: string, id: number, threadId: string | null): Promise<void> {
   await getPool().execute("UPDATE contracts SET thread_id = ? WHERE guild_id = ? AND id = ?", [threadId, guildId, id]);
 }
 
@@ -480,6 +483,22 @@ export async function setContractAnnouncement(guildId: string, id: number, chann
 export async function getContract(guildId: string, id: number): Promise<Contract | null> {
   const [rows] = await getPool().execute<DbRow[]>("SELECT * FROM contracts WHERE guild_id = ? AND id = ? LIMIT 1", [guildId, id]);
   return rows[0] ? toContract(rows[0]) : null;
+}
+
+export async function getContractByCode(guildId: string, code: string): Promise<Contract | null> {
+  const [rows] = await getPool().execute<DbRow[]>("SELECT * FROM contracts WHERE guild_id = ? AND code = ? LIMIT 1", [guildId, code]);
+  return rows[0] ? toContract(rows[0]) : null;
+}
+
+export async function listContractsForUser(guildId: string, userId: string): Promise<Contract[]> {
+  const [rows] = await getPool().execute<DbRow[]>(
+    `SELECT c.* FROM contracts c
+     JOIN contract_participants p ON p.contract_id = c.id
+     WHERE c.guild_id = ? AND p.user_id = ?
+     ORDER BY c.created_at DESC LIMIT 50`,
+    [guildId, userId],
+  );
+  return rows.map(toContract);
 }
 
 export async function listContracts(guildId: string, status?: ContractStatus): Promise<Contract[]> {

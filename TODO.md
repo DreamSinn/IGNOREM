@@ -1,35 +1,29 @@
-# Entregas
+# Situação do projeto
 
-## Base hospedável e persistência
+Atualizado para a versão 0.2.0. Itens marcados como concluídos já estão no código; o restante são pendências.
 
-- O projeto deve iniciar um processo Node persistente que responda em `/health` sem exigir login do Discord para o health check.
-- O banco deve manter configurações por servidor, contratos, participantes, pagamentos e parcelas individuais após reinicializações.
-- O token do Discord e o DSN não podem ser gravados no código ou em arquivos `.env` versionados.
+## Concluído
 
-## Painel administrativo dentro do Discord
+- [x] Base hospedável: processo Node, `/health` sem depender do Discord, encerramento gracioso.
+- [x] Persistência no MySQL: configurações por servidor, contratos, equipes, pagamentos e parcelas.
+- [x] Painel privado com botões, menus e formulários; cargos autorizados configuráveis.
+- [x] Estrutura em cinco categorias (comando, contratos, finanças, operações, configuração), com canal de voz e canal de auditoria.
+- [x] Movimentação de canais existentes para as novas categorias e remoção da categoria antiga vazia.
+- [x] Ciclo completo do contrato: disponível, aceito, em andamento, concluído, cancelado e arquivado.
+- [x] Avanço e cancelamento pelo botão Detalhes / atualizar do cartão, e cancelamento direto nele.
+- [x] `/contrato` com autocomplete e `/meus-contratos` para membros.
+- [x] Barra de progresso e situação colorida nos cartões.
+- [x] Registro de auditoria das ações administrativas.
+- [x] Notificação por mensagem privada ao aprovado na equipe e a cada participante no pagamento.
+- [x] Pagamentos com centavos inteiros e arredondamento determinístico.
+- [x] Remoção da ação de apagar todos os canais do servidor.
 
-- `/painel` deve abrir ou atualizar uma mensagem de painel na sala privada de configuração.
-- O painel deve usar botões, menus e modais para configurar cargos autorizados, criar/atualizar a estrutura, abrir contratos e consultar finanças.
-- O proprietário/Administrator deve conseguir inicializar o painel antes de os cargos gerenciais serem definidos.
-- Após a configuração, somente administradores e gerentes autorizados podem executar ações administrativas e financeiras.
+## Pendências
 
-## Estrutura temática da guilda
-
-- O bot deve criar categorias de comando, contratos, finanças, operações e configuração.
-- O bot deve criar salas de texto, salas de voz e a sala privada do painel sem duplicar canais já existentes com os mesmos nomes.
-- A estrutura deve usar nomes discretos e textos naturais, sem flood de emojis.
-- Cada contrato criado deve receber um tópico próprio no canal de contratos em andamento.
-
-## Contratos e histórico
-
-- O painel deve permitir criar contrato com título, contratante, valor em septims, descrição e local.
-- Contratos devem ser consultáveis por disponível, aceito, em andamento, concluído, cancelado e arquivado.
-- Gerentes/administradores devem conseguir adicionar participantes por seleção de usuários e alterar o estado do contrato.
-- O bot deve mostrar contrato, tópico, participantes, valor e situação do pagamento.
-
-## Pagamentos em septims
-
-- Apenas gerente/administrador pode registrar o pagamento de um contrato concluído.
-- O pagamento deve usar o valor total do contrato por padrão e dividir em partes iguais entre os participantes.
-- O histórico deve registrar total pago, quantidade de participantes, valor individual e quem lançou o pagamento.
-- O bot deve impedir um segundo pagamento para o mesmo contrato e preservar o ajuste de centavos necessário para fechar o total.
+- [ ] Decidir a regra financeira: manter a reserva de 10% ou dividir o total entre os participantes, como descrito no plano original.
+- [ ] Permitir alterar o percentual do caixa pelo painel, se a reserva for mantida.
+- [ ] Decidir se o caixa da guilda deve ser visível a todos os membros.
+- [ ] Reconciliação automática de contrato criado no banco com tópico ou anúncio faltando.
+- [ ] Testes automatizados para a divisão de pagamentos e as transições de estado.
+- [ ] Validação em banco MySQL real e em servidor de teste do Discord com permissões reais.
+- [ ] Imagem do painel hospedada em local próprio (hoje aponta para um CDN externo).

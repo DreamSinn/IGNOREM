@@ -1,30 +1,70 @@
 # Companhia de Mercenários — bot Discord
 
-Bot para uma organização de mercenários de RP de Skyrim. A operação acontece no Discord: o comando `/painel` inicializa uma sala privada onde administradores e gerentes usam botões, menus de seleção e modais para controlar a estrutura, contratos e pagamentos.
+Bot para uma guilda de mercenários de RP de Skyrim. Toda a operação acontece no Discord: o `/painel` abre uma sala privada com botões, menus e formulários para administrar a estrutura, os contratos, as equipes e os pagamentos em septims (moeda fictícia do RP; o bot não movimenta dinheiro real).
 
-## O que a primeira versão faz
+## Estrutura criada no servidor
 
-O bot cria uma categoria da Companhia com canais de painel, contratos, chat-geral, arquivo e caixa; cria um tópico para cada contrato; mantém os estados disponível, aceito, em andamento, concluído, cancelado e arquivado; e registra pagamentos em septims. Nesta versão não há criação de categorias separadas nem de canais de voz.
+O `/painel` (ou o botão **Sincronizar estrutura**) cria cinco categorias, reutilizando canais que já existam com o mesmo nome:
 
-A divisão é feita em centavos. O percentual de caixa salvo para a guilda (10% por padrão) é reservado; o restante é dividido igualmente, e os centavos restantes são distribuídos de forma determinística entre os primeiros participantes. A regra do percentual precisa ser alinhada ao plano/TODO, que descrevem a divisão do valor total entre os participantes.
+| Categoria | Canais | Uso |
+|---|---|---|
+| ⚔️ Comando | 🔒 Painel | Sala privada de configuração (somente proprietário, administradores e cargos autorizados) |
+| 📜 Contratos | 📜 Contratos, 🗃️ Arquivo | Cartões das missões em andamento e registros concluídos, cancelados ou arquivados |
+| 💰 Finanças | 💰 Caixa da Guilda | Saldo e totais da guilda (somente leitura para membros) |
+| 🏕️ Operações | 💬 Chat-Geral, 🔊 Sala de Operações (voz) | Conversa e reuniões da companhia |
+| 🛠️ Configuração | 🧾 Auditoria | Registro das ações administrativas (restrito a gerentes e administradores) |
 
-O cartão público de cada contrato é atualizado quando a equipe, a situação ou o pagamento muda. O botão **Detalhes / atualizar** permanece no anúncio para que gerentes possam abrir as próximas transições (inclusive **Em andamento**) mesmo depois de aceitar a missão. Em **Sincronizar anúncio**, o bot tenta reparar cartões antigos e remover cópias.
+Se você está atualizando uma instalação anterior, o bot move os canais existentes para as novas categorias e remove a categoria antiga "COMPANHIA" quando ela fica vazia.
 
-O Discord não permite mover uma mensagem para outro canal mantendo o mesmo ID: ao arquivar, o bot publica o cartão atualizado no canal de arquivo e apaga a mensagem anterior. Para isso, precisa conseguir enviar no canal de arquivo e apagar suas próprias mensagens no canal de origem; se a exclusão falhar, o bot mantém o anúncio original atualizado e informa o problema, sem esconder a falha. O ID do cartão é persistido para evitar novas publicações duplicadas.
+## Comandos
+
+- `/painel`: abre ou atualiza o painel na sala privada. Usa-se uma vez na instalação.
+- `/estrutura`: sincroniza categorias, canais e permissões. Use após atualizar o bot.
+- `/novo-contrato`: abre o formulário de novo contrato (gerentes e administradores).
+- `/contrato`: abre o cartão e os controles de um contrato. Tem autocomplete: digite parte do código ou do título e escolha na lista (gerentes e administradores).
+- `/contratos`: quadro de missões, com filtro por situação (gerentes e administradores).
+- `/meus-contratos`: lista as missões em que você participa. Disponível para todos.
+- `/pagamentos`: livro-caixa com os pagamentos lançados (gerentes e administradores).
+
+## Ciclo de um contrato
+
+1. **Disponível.** O gerente cria o contrato; ele aparece no canal Contratos com o botão **Tenho interesse** para os membros.
+2. **Aceito.** O gerente aprova os interessados na equipe (o membro recebe uma DM). Ao aprovar, o contrato passa para aceito.
+3. **Em andamento.** O gerente avança a missão pelo botão **Detalhes / atualizar** do cartão ou pelo `/contrato`.
+4. **Concluído.** O gerente conclui a missão e lança o pagamento. Cada participante recebe uma DM com a sua parte. O cartão vai para o Arquivo.
+5. **Arquivado.** Registro final. Missões canceladas também podem ser arquivadas.
+
+Em qualquer etapa, o cartão mostra uma barra de progresso e a situação atual. Cada ação relevante (criação, aprovação, mudança de situação, pagamento e alteração de cargos) é registrada no canal Auditoria.
+
+## Permissões
+
+- **Proprietário ou Administrator** do servidor pode criar a estrutura, definir cargos e textos e fazer tudo o que os administradores configurados fazem.
+- **Administradores configurados** podem alterar cargos, textos e estrutura e limpar mensagens do canal atual.
+- **Gerentes configurados** podem criar contratos, abrir contratos, montar equipes, alterar situações e registrar pagamentos.
+- **Membros** veem os contratos, registram interesse e consultam as próprias missões.
+
+Os cargos são definidos no painel, no botão **Cargos autorizados**. Use IDs de cargo; o `@everyone` não pode ser autorizado.
+
+## Regra financeira
+
+Ao lançar um pagamento, o bot reserva o percentual configurado para o caixa da guilda (10% por padrão) e divide o restante igualmente entre os participantes. Os centavos que sobram são distribuídos de forma determinística entre os primeiros participantes, então o total pago sempre fecha. O percentual está salvo no banco, mas ainda não há controle para alterá-lo pelo painel. O plano original previa dividir o valor total sem reserva; essa diferença ainda precisa ser confirmada.
 
 ## Criar o aplicativo Discord
 
-1. Acesse o [Discord Developer Portal](https://discord.com/developers/applications) e crie uma Application.
-2. Em **Bot**, crie o bot e copie o token apenas para o armazenamento seguro do projeto. Nunca publique o token no chat ou no Git.
-3. Em **OAuth2 > URL Generator**, selecione os escopos `bot` e `applications.commands`. Conceda as permissões necessárias para criar e editar canais, enviar mensagens, criar tópicos, gerenciar tópicos, **Gerenciar mensagens** e usar menus/modais. O convite deve ser feito por um administrador do servidor.
-4. Depois que o bot estiver no servidor, execute `/painel`. O proprietário ou alguém com Administrator pode inicializar a estrutura.
-5. Na sala privada criada, use **Definir cargos** e informe os IDs dos cargos de gerente e administrador. O modo desenvolvedor do Discord permite copiar IDs.
+1. Crie uma Application no [Discord Developer Portal](https://discord.com/developers/applications).
+2. Em **Bot**, crie o bot e copie o token para o armazenamento seguro do projeto. Nunca publique o token em chat ou no Git.
+3. Em **OAuth2 > URL Generator**, selecione os escopos `bot` e `applications.commands`, e as permissões: Ver canais, Enviar mensagens, Enviar mensagens em tópicos, Incorporar links, Gerenciar canais, Gerenciar tópicos, Gerenciar mensagens, Ler histórico de mensagens. Convide o bot com um administrador do servidor.
+4. Execute `/painel` no servidor. O proprietário ou alguém com Administrator inicializa a estrutura.
+5. Na sala privada, use **Cargos autorizados** e informe os IDs dos cargos de gerente e administrador (modo desenvolvedor do Discord permite copiar IDs).
 
-Após atualizar o bot, execute `/estrutura` para aplicar os overwrites de permissão revisados. Se um contrato antigo não tiver mais controles no cartão, abra `/contratos`, filtre o estado, clique no código do contrato e use **Sincronizar anúncio**. Depois, o botão **Detalhes / atualizar** fica disponível no anúncio em qualquer estado.
+## Variáveis de ambiente
 
-## Variáveis protegidas
-
-Configure `DATABASE_URL` pelo banco gerenciado do projeto e `DISCORD_TOKEN` pelo recurso de segredos do projeto. O TLS do MySQL valida certificados por padrão; se o provedor usar uma CA privada, informe o caminho em `DATABASE_CA_PATH`. `DISCORD_GUILD_ID` é opcional e serve para registrar `/painel` imediatamente em um servidor durante a instalação; sem ele, o comando é registrado globalmente e pode levar algum tempo para aparecer. `PORT` usa 3000 por padrão.
+- `DATABASE_URL`: conexão MySQL (`mysql://usuario:senha@host:3306/banco`). Configure pelo banco gerenciado do projeto.
+- `DATABASE_CA_PATH`: caminho para a CA, se o banco usar certificado privado. O TLS valida certificados por padrão.
+- `DISCORD_TOKEN`: token do bot. Configure pelo recurso de segredos do projeto.
+- `DISCORD_GUILD_ID`: opcional. Registra os comandos imediatamente em um servidor; sem ele, o registro é global e pode levar algum tempo.
+- `PORT`: porta do servidor HTTP (padrão 3000).
+- `PANEL_BANNER_URL`: opcional. Imagem do cabeçalho do painel e dos cartões.
 
 ## Execução local
 
@@ -36,12 +76,18 @@ pnpm typecheck
 pnpm start
 ```
 
-O endpoint `GET /health` começa a responder antes da inicialização do banco/Discord e informa separadamente se o banco está pronto e se o bot está conectado; a conexão Discord não é exigida para a resposta. O schema, incluindo candidaturas e tabelas financeiras, é aplicado automaticamente na inicialização e também pode ser aplicado com `pnpm migrate`.
+O schema (incluindo candidaturas, finanças e auditoria) é aplicado na inicialização. Também é possível aplicá-lo separadamente com `pnpm migrate`.
 
-## Hospedagem
+## Hospedagem e saúde
 
-A imagem de produção usa o `Dockerfile`, inicia `pnpm start` e expõe `GET /health` para o health check. O banco é a fonte durável; a imagem e o filesystem do processo não devem ser usados para guardar dados da guilda.
+A imagem de produção é gerada pelo `Dockerfile`, que inicia `pnpm start`. `GET /health` responde antes da conexão com o banco e com o Discord: retorna 200 quando o banco está pronto, e 503 enquanto não estiver. O campo `discord` informa se o bot está conectado. O processo trata SIGTERM e SIGINT encerrando o servidor HTTP, o cliente Discord e o pool do banco.
 
-## Segurança operacional
+O banco é a fonte durável dos dados. Não use o filesystem do container para guardar dados da guilda.
 
-Apenas proprietário/Administrator ou cargos de administrador configurados podem alterar cargos, textos e estrutura. Gerentes e administradores podem criar contratos, consultar contratos, montar equipes, alterar estados e registrar pagamentos. O bot não realiza pagamentos reais: septims são uma unidade fictícia registrada para o RP.
+## Limitações conhecidas
+
+- O caixa da guilda é visível para todos os membros, porque o saldo é exibido no canal de leitura. Se preferir restringir, ajuste as permissões em `syncOperationalPermissions`.
+- Para localizar cartões antigos, o bot percorre até 10.000 mensagens por canal (Contratos e Arquivo). Cópias mais antigas que isso precisam ser removidas manualmente.
+- Se o registro de um contrato for salvo no banco e uma etapa posterior falhar no Discord, o bot informa o código e pede que não recrie o contrato. Não há reconciliação automática nesse caso.
+- O bot depende das permissões do cargo para apagar as próprias mensagens na troca de canal (Contratos para Arquivo). Se faltar a permissão, o bot mantém o cartão original atualizado e avisa.
+- Não há suíte de testes automatizados. A validação atual é a compilação (`pnpm typecheck`) e testes manuais em um servidor de teste.
