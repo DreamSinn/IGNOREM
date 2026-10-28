@@ -17,6 +17,8 @@ Atualizado para a versão 0.2.0. Itens marcados como concluídos já estão no c
 - [x] Notificação por mensagem privada ao aprovado na equipe e a cada participante no pagamento.
 - [x] Pagamentos com centavos inteiros e arredondamento determinístico.
 - [x] Remoção da ação de apagar todos os canais do servidor.
+- [x] Comando `/identidade` para aplicar avatar, banner e foto do bot e do servidor.
+- [x] Imagens configuráveis pelo painel: links validados antes de salvar, com fallback para as imagens padrão.
 
 ## Pendências
 
@@ -26,4 +28,4 @@ Atualizado para a versão 0.2.0. Itens marcados como concluídos já estão no c
 - [ ] Reconciliação automática de contrato criado no banco com tópico ou anúncio faltando.
 - [ ] Testes automatizados para a divisão de pagamentos e as transições de estado.
 - [ ] Validação em banco MySQL real e em servidor de teste do Discord com permissões reais.
-- [ ] Imagem do painel hospedada em local próprio (hoje aponta para um CDN externo).
+- [x] Imagens oficiais hospedadas pelo próprio bot, com banner por situação do contrato.

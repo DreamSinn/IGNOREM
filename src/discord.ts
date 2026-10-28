@@ -54,6 +54,7 @@ import {
   type ContractStatus,
   type GuildConfig,
 } from "./db.js";
+import { EMBED_IMAGE_SLOTS, PROFILE_IMAGE_SLOTS, checkImageUrl, imageBytes, imageKeyForStatus, imageUrl, isHttpsUrl } from "./assets.js";
 
 const COLORS = {
   midnight: 0x111827,
@@ -77,8 +78,6 @@ const ICONS = {
   clock: "⏳",
   lock: "🔒",
 };
-// Override this with PANEL_BANNER_URL in Render if you replace the artwork later.
-const PANEL_BANNER_URL = process.env.PANEL_BANNER_URL ?? "https://files.manuscdn.com/user_upload_by_module/session_file/310519663954740263/lSRWcVrLiNCANlcG.png";
 const STATUS_LABELS: Record<ContractStatus, string> = {
   available: "🟢 Disponível",
   accepted: "🔵 Aceito",
@@ -100,6 +99,9 @@ const NEXT_STATUS: Partial<Record<ContractStatus, { status: ContractStatus; labe
   in_progress: { status: "completed", label: "Concluir missão", emoji: "🏁" },
 };
 
+// Rodapé do painel. O legado é reconhecido para não duplicar a mensagem de instalações antigas.
+const PANEL_FOOTER = "COMPANHIA DA LUA DE FERRO  •  O registro permanece";
+const LEGACY_PANEL_FOOTER = "COMPANHIA DE MERCENÁRIOS  •  O registro permanece";
 const LEGACY_CATEGORY_NAME = "𝗖𝗢𝗠𝗣𝗔𝗡𝗛𝗜𝗔";
 const categorySpecs = [
   { key: "comando", name: "⚔️・𝗖𝗢𝗠𝗔𝗡𝗗𝗢", channels: [
@@ -210,8 +212,14 @@ function input(customId: string, label: string, style: TextInputStyle, required 
   return new TextInputBuilder().setCustomId(customId).setLabel(label).setStyle(style).setRequired(required).setMaxLength(maxLength);
 }
 
+function withImages(embed: EmbedBuilder, banner?: string, thumbnail?: string): EmbedBuilder {
+  if (banner) embed.setImage(banner);
+  if (thumbnail) embed.setThumbnail(thumbnail);
+  return embed;
+}
+
 function panelEmbed(config: GuildConfig): EmbedBuilder {
-  return new EmbedBuilder()
+  const embed = new EmbedBuilder()
     .setColor(COLORS.gold)
     .setTitle(`${ICONS.crown}  ${config.texts.panelTitle}`)
     .setDescription(`> ${config.texts.panelDescription}\n\n**Livro de comando da Companhia**\nUse os controles abaixo para registrar missões, organizar a equipe e manter o caixa em ordem. Todas as ações administrativas ficam registradas no histórico.`)
@@ -221,9 +229,9 @@ function panelEmbed(config: GuildConfig): EmbedBuilder {
       { name: `${ICONS.coin} Tesouraria`, value: `Unidade: **${config.currency}**`, inline: true },
       { name: `${ICONS.scroll} Quadro de missões`, value: "Abra contratos, forme equipes, mova estados e lance pagamentos sem sair do Discord.", inline: false },
     )
-    .setImage(PANEL_BANNER_URL)
-    .setFooter({ text: "COMPANHIA DE MERCENÁRIOS  •  O registro permanece" })
+    .setFooter({ text: PANEL_FOOTER })
     .setTimestamp();
+  return withImages(embed, imageUrl(config.texts, "img:base"));
 }
 
 function panelComponents(): ActionRowBuilder<ButtonBuilder>[] {
@@ -241,6 +249,8 @@ function panelComponents(): ActionRowBuilder<ButtonBuilder>[] {
     ),
     new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId("panel:clear-chat").setLabel("Limpar chat atual").setEmoji("🧹").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("panel:images-embeds").setLabel("Imagens dos cartões").setEmoji("🖼️").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("panel:images-profile").setLabel("Imagens de perfil").setEmoji("🪪").setStyle(ButtonStyle.Secondary),
     ),
   ];
 }
@@ -369,7 +379,7 @@ export async function provisionGuildStructure(guild: Guild): Promise<GuildConfig
 async function upsertPanelMessage(channel: Extract<Channel, { type: ChannelType.GuildText }>, config: GuildConfig): Promise<void> {
   const recent = await channel.messages.fetch({ limit: 100 });
   const matches = [...recent.values()]
-    .filter((message) => message.author.id === channel.client.user?.id && message.embeds.some((embed) => embed.footer?.text === "COMPANHIA DE MERCENÁRIOS  •  O registro permanece" || embed.title === `${ICONS.crown}  ${config.texts.panelTitle}`))
+    .filter((message) => message.author.id === channel.client.user?.id && message.embeds.some((embed) => (embed.footer?.text === PANEL_FOOTER || embed.footer?.text === LEGACY_PANEL_FOOTER) || embed.title === `${ICONS.crown}  ${config.texts.panelTitle}`))
     .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
   if (matches[0]) {
     await matches[0].edit({ embeds: [panelEmbed(config)], components: panelComponents() });
@@ -379,8 +389,8 @@ async function upsertPanelMessage(channel: Extract<Channel, { type: ChannelType.
   }
 }
 
-function contractEmbed(contract: Contract, participantText = "Nenhum participante registrado."): EmbedBuilder {
-  return new EmbedBuilder()
+function contractEmbed(contract: Contract, config: GuildConfig, participantText = "Nenhum participante registrado."): EmbedBuilder {
+  const embed = new EmbedBuilder()
     .setColor(contract.status === "completed" ? COLORS.green : contract.status === "cancelled" ? COLORS.red : contract.status === "in_progress" ? COLORS.gold : COLORS.steel)
     .setAuthor({ name: `${ICONS.sword}  CONTRATO DA COMPANHIA` })
     .setTitle(`${contract.code}  •  ${contract.title}`)
@@ -394,9 +404,9 @@ function contractEmbed(contract: Contract, participantText = "Nenhum participant
       { name: "💰 Pagamento", value: contract.paymentStatus === "paid" ? `${ICONS.check} Lançado` : `${ICONS.clock} Pendente`, inline: true },
       { name: `${ICONS.people} Equipe`, value: participantText, inline: false },
     )
-    .setThumbnail(PANEL_BANNER_URL)
     .setFooter({ text: `Registro da Companhia  •  ${contract.code}` })
     .setTimestamp(contract.createdAt);
+  return withImages(embed, imageUrl(config.texts, imageKeyForStatus(contract.status)), imageUrl(config.texts, "img:foto"));
 }
 
 const statusChannelKeys: Record<ContractStatus, string> = {
@@ -491,7 +501,7 @@ async function announceContractState(guild: Guild, config: GuildConfig, contract
   const botId = guild.client.user?.id;
   if (!botId) return "O bot ainda não está conectado; o anúncio não foi atualizado.";
   const participants = await listParticipants(guild.id, contract.id);
-  const embed = contractEmbed(contract, participantSummary(participants));
+  const embed = contractEmbed(contract, config, participantSummary(participants));
   const announcementButtons = new ActionRowBuilder<ButtonBuilder>();
   if (contract.status === "available") {
     announcementButtons.addComponents(new ButtonBuilder().setCustomId(`contract:apply:${contract.id}`).setLabel("Tenho interesse").setEmoji("🪶").setStyle(ButtonStyle.Success));
@@ -686,7 +696,8 @@ async function contractDetail(interaction: ButtonInteraction | ChatInputCommandI
     buttons.addComponents(new ButtonBuilder().setCustomId(`contract:sync:${id}`).setLabel("Sincronizar anúncio").setEmoji("🔄").setStyle(ButtonStyle.Secondary));
   }
   if (buttons.components.length) rows.push(buttons);
-  await interaction.editReply({ embeds: [contractEmbed(contract, participantText)], components: rows });
+  const cardConfig = await getGuildConfig(interaction.guildId!);
+  await interaction.editReply({ embeds: [contractEmbed(contract, cardConfig, participantText)], components: rows });
 }
 
 async function contractsMenu(interaction: ButtonInteraction | ChatInputCommandInteraction): Promise<void> {
@@ -777,6 +788,22 @@ async function textsModal(interaction: ButtonInteraction): Promise<void> {
   await interaction.showModal(modal);
 }
 
+async function imagesModal(interaction: ButtonInteraction, group: "embeds" | "profile"): Promise<void> {
+  const config = await getGuildConfig(interaction.guildId!);
+  const slots = group === "embeds" ? EMBED_IMAGE_SLOTS : PROFILE_IMAGE_SLOTS;
+  const modal = new ModalBuilder()
+    .setCustomId(`config:images:${group}`)
+    .setTitle(group === "embeds" ? "Imagens dos cartões" : "Imagens de perfil");
+  modal.addComponents(...slots.map((slot, index) => {
+    const field = input(`slot_${index}`, slot.label.slice(0, 45), TextInputStyle.Short, false, 1000)
+      .setPlaceholder("https://... (deixe vazio para usar a imagem padrão)");
+    const current = config.texts[slot.key]?.trim();
+    if (current && isHttpsUrl(current)) field.setValue(current);
+    return new ActionRowBuilder<TextInputBuilder>().addComponents(field);
+  }));
+  await interaction.showModal(modal);
+}
+
 async function paymentModal(interaction: ButtonInteraction, id: number): Promise<unknown> {
   const contract = await getContract(interaction.guildId!, id);
   if (!contract) return interaction.reply({ content: "Contrato não encontrado.", ephemeral: true });
@@ -833,6 +860,35 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown
     await interaction.editReply("Cargos autorizados atualizados. O painel e os canais operacionais respeitam essa lista.");
     return;
   }
+  if (interaction.customId === "config:images:embeds" || interaction.customId === "config:images:profile") {
+    if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem alterar imagens.", ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    const slots = interaction.customId.endsWith("embeds") ? EMBED_IMAGE_SLOTS : PROFILE_IMAGE_SLOTS;
+    const values: Record<string, string> = {};
+    const problems: string[] = [];
+    for (const [index, slot] of slots.entries()) {
+      const raw = interaction.fields.getTextInputValue(`slot_${index}`).trim();
+      if (!raw) {
+        values[slot.key] = "";
+        continue;
+      }
+      if (!isHttpsUrl(raw)) {
+        problems.push(`${slot.label}: use um link que comece com https://`);
+        continue;
+      }
+      const error = await checkImageUrl(raw);
+      if (error) problems.push(`${slot.label}: ${error}`);
+      else values[slot.key] = raw;
+    }
+    if (problems.length) {
+      return interaction.editReply(`Nenhuma imagem foi salva. Corrija os itens abaixo e envie o formulário de novo:\n${problems.map((problem) => `• ${problem}`).join("\n")}`);
+    }
+    const config = await setGuildTexts(interaction.guildId!, values);
+    const panel = interaction.guild!.channels.cache.get(config.channelIds["painel-configuracao"]);
+    if (isTextChannel(panel)) await upsertPanelMessage(panel, config).catch((error) => console.warn("Não foi possível atualizar o painel", error));
+    await audit(interaction.guild!, `🖼️ Imagens (${interaction.customId.endsWith("embeds") ? "cartões" : "perfil"}) alteradas por <@${interaction.user.id}>.`);
+    return interaction.editReply(`${ICONS.check} Imagens salvas. Campos vazios voltaram para a imagem padrão.\nOs novos banners aparecem nos cartões na próxima atualização de cada contrato. Para as imagens de perfil, execute \`/identidade\`.`);
+  }
   if (interaction.customId === "config:texts") {
     if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem alterar textos.", ephemeral: true });
     await interaction.deferReply({ ephemeral: true });
@@ -866,7 +922,7 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown
       createdContract = contract;
       const thread = await contractChannel.threads.create({ name: `${contract.code} — ${contract.title}`.slice(0, 100), autoArchiveDuration: 10080, reason: "Tópico de contrato" });
       await setContractThread(interaction.guildId!, contract.id, thread.id);
-      await thread.send({ embeds: [contractEmbed(contract)] });
+      await thread.send({ embeds: [contractEmbed(contract, config)] });
       const syncWarning = await syncContractAnnouncement(interaction.guild, config, contract);
       await audit(interaction.guild, `📜 Contrato **${contract.code}** — ${contract.title} registrado por <@${interaction.user.id}>.`);
       await interaction.editReply(`Contrato ${contract.code} criado. Tópico: ${thread}${syncWarning ? `\n⚠️ ${syncWarning}` : ""}`);
@@ -936,6 +992,10 @@ async function handleButton(interaction: ButtonInteraction): Promise<unknown> {
   if (interaction.customId === "panel:clear-chat") {
     if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem limpar mensagens.", ephemeral: true });
     return maintenanceModal(interaction);
+  }
+  if (interaction.customId === "panel:images-embeds" || interaction.customId === "panel:images-profile") {
+    if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem alterar imagens.", ephemeral: true });
+    return imagesModal(interaction, interaction.customId === "panel:images-embeds" ? "embeds" : "profile");
   }
   if (interaction.customId === "panel:new-contract") {
     if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem criar contratos.", ephemeral: true });
@@ -1067,7 +1127,7 @@ async function handleSelect(interaction: StringSelectMenuInteraction | UserSelec
     const syncWarning = await syncContractAnnouncement(interaction.guild!, await getGuildConfig(interaction.guildId!), contract);
     return interaction.editReply({
       content: syncWarning ? `⚠️ ${syncWarning}` : "",
-      embeds: [contractEmbed(contract, participantSummary(participants))],
+      embeds: [contractEmbed(contract, await getGuildConfig(interaction.guildId!), participantSummary(participants))],
       components: interaction.message.components,
     });
   }
@@ -1112,6 +1172,10 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
     const omitted = contracts.length - lines.length;
     return interaction.editReply(`${ICONS.book} **Suas missões**\n\n${lines.join("\n\n")}${omitted > 0 ? `\n\n_E mais ${omitted} missão(ões)._` : ""}`);
   }
+  if (interaction.commandName === "identidade") {
+    if (!(await canAdmin(interaction))) return interaction.reply({ content: `${ICONS.lock} Apenas administradores autorizados podem aplicar a identidade visual.`, ephemeral: true });
+    return applyIdentity(interaction);
+  }
   if (interaction.commandName === "estrutura") {
     if (!(await canAdmin(interaction))) return interaction.reply({ content: `${ICONS.lock} Apenas administradores autorizados podem sincronizar a estrutura.`, ephemeral: true });
     await interaction.deferReply({ ephemeral: true });
@@ -1136,15 +1200,37 @@ async function handleAutocomplete(interaction: AutocompleteInteraction): Promise
   }
 }
 
+async function applyIdentity(interaction: ChatInputCommandInteraction): Promise<unknown> {
+  await interaction.deferReply({ ephemeral: true });
+  const texts = (await getGuildConfig(interaction.guildId!)).texts;
+  const results: string[] = [];
+  const attempt = async (label: string, action: () => Promise<unknown>): Promise<void> => {
+    try {
+      await action();
+      results.push(`✅ ${label}`);
+    } catch (error) {
+      results.push(`⚠️ ${label}: ${error instanceof Error ? error.message : "falhou"}`);
+    }
+  };
+  const reason = "Identidade visual da Companhia";
+  await attempt("Avatar do bot", async () => interaction.client.user!.setAvatar(await imageBytes(texts, "img:avatar")));
+  await attempt("Banner do bot", async () => interaction.client.user!.setBanner(await imageBytes(texts, "img:banner-bot")));
+  await attempt("Foto do servidor", async () => interaction.guild!.setIcon(await imageBytes(texts, "img:foto"), reason));
+  await attempt("Banner do servidor", async () => interaction.guild!.setBanner(await imageBytes(texts, "img:banner-servidor"), reason));
+  await audit(interaction.guild!, `🎨 Identidade visual aplicada por <@${interaction.user.id}>.`);
+  return interaction.editReply(`${ICONS.check} **Identidade visual**\n${results.join("\n")}\n\n_O banner do servidor exige nível 2 de boost. O Discord limita a troca de avatar e de banner do bot; se atingir o limite, aguarde alguns minutos e execute de novo._`);
+}
+
 export async function registerDiscord(client: Client): Promise<void> {
   const commands = [
-    { name: "painel", description: "Abrir o painel da Companhia de Mercenários" },
+    { name: "painel", description: "Abrir o painel da Companhia da Lua de Ferro" },
     { name: "contratos", description: "Consultar o quadro de missões e contratos" },
     { name: "novo-contrato", description: "Registrar uma nova missão no livro da Companhia" },
     { name: "pagamentos", description: "Consultar o livro-caixa e pagamentos lançados" },
     { name: "estrutura", description: "Sincronizar categorias, canais e painel privado" },
     { name: "contrato", description: "Abrir o cartão e os controles de um contrato", options: [{ name: "codigo", description: "Código ou título do contrato", type: ApplicationCommandOptionType.String, required: true, autocomplete: true }] },
     { name: "meus-contratos", description: "Ver as missões em que você participa" },
+    { name: "identidade", description: "Aplicar as imagens oficiais no bot e no servidor" },
   ];
   const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN ?? "");
   if (process.env.DISCORD_GUILD_ID) {

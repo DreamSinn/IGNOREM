@@ -1,8 +1,8 @@
-# Companhia de Mercenários — plano do bot Discord
+# Companhia da Lua de Ferro — plano do bot Discord
 
 ## Escopo aprovado
 
-Construir um bot instalável e hospedável para uma guilda de mercenários de RP de Skyrim no Discord. O bot deve criar uma estrutura temática discreta, sem excesso de emojis ou textos artificiais; manter contratos e pagamentos em septims; distribuir o valor igualmente entre os participantes; e permitir que toda a configuração operacional seja feita por um painel privado dentro do próprio Discord.
+Construir um bot instalável e hospedável para a Companhia da Lua de Ferro, uma guilda de mercenários de RP de Skyrim, no Discord. O bot deve criar uma estrutura temática discreta, sem excesso de emojis ou textos artificiais; manter contratos e pagamentos em septims; distribuir o valor igualmente entre os participantes; e permitir que toda a configuração operacional seja feita por um painel privado dentro do próprio Discord.
 
 ## Implementação
 

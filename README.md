@@ -1,6 +1,6 @@
-# Companhia de Mercenários — bot Discord
+# Companhia da Lua de Ferro — bot Discord
 
-Bot para uma guilda de mercenários de RP de Skyrim. Toda a operação acontece no Discord: o `/painel` abre uma sala privada com botões, menus e formulários para administrar a estrutura, os contratos, as equipes e os pagamentos em septims (moeda fictícia do RP; o bot não movimenta dinheiro real).
+Bot para a Companhia da Lua de Ferro, uma guilda de mercenários de RP de Skyrim. Toda a operação acontece no Discord: o `/painel` abre uma sala privada com botões, menus e formulários para administrar a estrutura, os contratos, as equipes e os pagamentos em septims (moeda fictícia do RP; o bot não movimenta dinheiro real).
 
 ## Estrutura criada no servidor
 
@@ -24,7 +24,24 @@ Se você está atualizando uma instalação anterior, o bot move os canais exist
 - `/contrato`: abre o cartão e os controles de um contrato. Tem autocomplete: digite parte do código ou do título e escolha na lista (gerentes e administradores).
 - `/contratos`: quadro de missões, com filtro por situação (gerentes e administradores).
 - `/meus-contratos`: lista as missões em que você participa. Disponível para todos.
+- `/identidade`: aplica as imagens de perfil (avatar e banner do bot, foto e banner do servidor) configuradas no painel. Administradores.
 - `/pagamentos`: livro-caixa com os pagamentos lançados (gerentes e administradores).
+
+## Imagens
+
+As imagens são configuradas pelo próprio painel, sem mexer em arquivos:
+
+- **Imagens dos cartões** (botão no painel): banner padrão (painel e contratos disponíveis), e banners de aceito, em andamento, concluído, cancelado e arquivado.
+- **Imagens de perfil** (botão no painel): arquivado, avatar do bot, banner do bot, foto do servidor (também usada como miniatura dos cartões) e banner do servidor.
+
+Cole o link direto de cada imagem (precisa começar com `https://` e apontar para um arquivo de imagem). O bot confere cada link antes de salvar; se algum estiver errado, nada é gravado e o bot mostra o que corrigir. Campo vazio volta para a imagem padrão.
+
+Dicas:
+- Use um link permanente (por exemplo Imgur, GitHub ou outro serviço de imagens). Links do CDN do próprio Discord expiram e a imagem deixa de aparecer.
+- Os banners dos cartões mudam na próxima atualização de cada contrato. Para atualizar um cartão antigo na hora, use **Sincronizar anúncio** no detalhe do contrato.
+- Depois de trocar as imagens de perfil, execute `/identidade` para aplicá-las no bot e no servidor. O Discord limita a troca de avatar e banner do bot.
+
+Se nenhum link for configurado, o bot usa as imagens padrão. Isso exige a variável `PUBLIC_BASE_URL`, pois o Discord busca as imagens padrão pelo endereço público do bot.
 
 ## Ciclo de um contrato
 
@@ -64,7 +81,7 @@ Ao lançar um pagamento, o bot reserva o percentual configurado para o caixa da 
 - `DISCORD_TOKEN`: token do bot. Configure pelo recurso de segredos do projeto.
 - `DISCORD_GUILD_ID`: opcional. Registra os comandos imediatamente em um servidor; sem ele, o registro é global e pode levar algum tempo.
 - `PORT`: porta do servidor HTTP (padrão 3000).
-- `PANEL_BANNER_URL`: opcional. Imagem do cabeçalho do painel e dos cartões.
+- `PUBLIC_BASE_URL`: endereço público do serviço (ex.: `https://bot.exemplo.com`), usado só pelas imagens padrão em `/assets/<nome>`. Não é necessário se você configurar os links no painel.
 
 ## Execução local
 
