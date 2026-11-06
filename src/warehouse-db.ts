@@ -95,8 +95,10 @@ export async function countWarehouseHistory(guildId: string, filter = ""): Promi
 
 export async function listWarehouseHistory(guildId: string, filter = "", limit = 10, offset = 0): Promise<WarehouseLog[]> {
   const search = `%${filter.trim()}%`;
+  const safeLimit = Math.min(Math.max(Math.trunc(limit), 1), 100);
+  const safeOffset = Math.max(Math.trunc(offset), 0);
   const [rows] = await getDatabasePool().execute<Row[]>(`SELECT id, action, item_name, quantity, user_id, display_name, created_at
     FROM warehouse_history WHERE guild_id = ? AND (? = '' OR item_name LIKE ? OR display_name LIKE ? OR user_id LIKE ?)
-    ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, [guildId, filter.trim(), search, search, search, Math.min(Math.max(limit, 1), 100), Math.max(offset, 0)]);
+    ORDER BY created_at DESC, id DESC LIMIT ${safeLimit} OFFSET ${safeOffset}`, [guildId, filter.trim(), search, search, search]);
   return rows.map((r) => ({ id: Number(r.id), action: String(r.action) as WarehouseLog["action"], itemName: String(r.item_name), quantity: Number(r.quantity), userId: String(r.user_id), displayName: String(r.display_name), createdAt: new Date(String(r.created_at)) }));
 }

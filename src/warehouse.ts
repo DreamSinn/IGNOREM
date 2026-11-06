@@ -9,7 +9,26 @@ const GOLD = 0xc49a4a;
 const date = (d: Date) => new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short", timeZone: "America/Sao_Paulo" }).format(d);
 const encodeFilter = (value: string) => Buffer.from(value, "utf8").toString("base64url");
 const decodeFilter = (value?: string) => value ? Buffer.from(value, "base64url").toString("utf8") : "";
+const itemIcon = (name: string): string => {
+  const n = name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("pt-BR");
+  if (/pocao|elixir|frasco|veneno|tonico/.test(n)) return "🧪";
+  if (/espada|adaga|machado|arco|flecha|lanca|martelo|arma|punhal/.test(n)) return "⚔️";
+  if (/armadura|capacete|elmo|escudo|bota|luva|peitoral|cota|roupa/.test(n)) return "🛡️";
+  if (/pergaminho|livro|mapa|carta|diario/.test(n)) return "📜";
+  if (/gema|joia|rubi|safira|esmeralda|diamante|colar|anel/.test(n)) return "💎";
+  if (/minerio|mineral|lingote|ferro|aco|prata|ouro|cobre|carvao|pedra/.test(n)) return "⛏️";
+  if (/erva|flor|planta|raiz|ingrediente|cogumelo|alquimia/.test(n)) return "🌿";
+  if (/pao|carne|queijo|maca|comida|alimento|peixe|cozido|sopa|fruta/.test(n)) return "🍖";
+  if (/pocao/.test(n)) return "🧪";
+  if (/pele|couro|pena|osso|garra|dente|escama|lobo|urso/.test(n)) return "🐾";
+  if (/madeira|lenha|graveto|tabua/.test(n)) return "🪵";
+  if (/ferramenta|picareta|chave|alicate|serra/.test(n)) return "🛠️";
+  if (/moeda|septim|dinheiro|ouro/.test(n)) return "🪙";
+  if (/pano|tecido|linho|seda/.test(n)) return "🧵";
+  return "📦";
+};
 const field = (id: string, label: string, style: TextInputStyle, required = true, maxLength = 100) => new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(style).setRequired(required).setMaxLength(maxLength);
+const pageId = (kind: "view" | "history", page: number, filter: string, direction: "prev" | "next") => `warehouse:${kind}:${page}:${filter ? encodeFilter(filter) : "-"}:${direction}`;
 
 export function warehouseAdminButton(): ButtonBuilder {
   return new ButtonBuilder().setCustomId("warehouse:configure").setLabel("Configurar Wherehouse").setEmoji("📦").setStyle(ButtonStyle.Secondary);
@@ -54,16 +73,21 @@ async function refreshPublicPanel(guild: ButtonInteraction["guild"] | ModalSubmi
 async function showItems(interaction: ButtonInteraction, page: number, filter = ""): Promise<void> {
   const items = await listWarehouseItems(interaction.guildId!);
   const matched = filter ? items.filter((item) => item.name.toLocaleLowerCase("pt-BR").includes(filter.toLocaleLowerCase("pt-BR"))) : items;
-  const size = 10;
-  const pages = Math.max(1, Math.ceil(matched.length / size));
+  const size = 20;
+  const pages = Math.max(1, Math.ceil((filter ? matched.length : WAREHOUSE_CAPACITY) / size));
   const current = Math.min(Math.max(page, 0), pages - 1);
   const view = matched.slice(current * size, (current + 1) * size);
-  const embed = new EmbedBuilder().setColor(GOLD).setTitle("📦 Conteúdo do Wherehouse")
-    .setDescription(view.length ? view.map((item, i) => `**${current * size + i + 1}. ${item.name}** — quantidade: **${item.quantity}**`).join("\n") : (filter ? `Nenhum item encontrado para **${filter}**.` : "O baú está vazio."))
-    .setFooter({ text: `${matched.length} tipo(s) de item • ${current + 1}/${pages} páginas${filter ? ` • filtro: ${filter}` : ""}` });
+  const slots = Array.from({ length: size }, (_, i) => {
+    const slotNo = current * size + i + 1;
+    const item = view[i];
+    return item ? `**${String(slotNo).padStart(3, "0")}** ${itemIcon(item.name)} **${item.name}**\n　└ Quantidade: **${item.quantity}**` : `**${String(slotNo).padStart(3, "0")}** ◻️ _Espaço vazio_`;
+  });
+  const embed = new EmbedBuilder().setColor(GOLD).setTitle("🧰 Inventário do Wherehouse")
+    .setDescription(`${filter && !matched.length ? `Nenhum item encontrado para **${filter}**.` : slots.join("\n")}`)
+    .setFooter({ text: `${matched.length}/${WAREHOUSE_CAPACITY} espaços ocupados • ${current + 1}/${pages} páginas${filter ? ` • busca: ${filter}` : " • ícones sugeridos pelo nome"}` });
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`warehouse:view:${Math.max(0, current - 1)}${filter ? `:${encodeFilter(filter)}` : ""}`).setLabel("Anterior").setStyle(ButtonStyle.Secondary).setDisabled(current === 0),
-    new ButtonBuilder().setCustomId(`warehouse:view:${Math.min(pages - 1, current + 1)}${filter ? `:${encodeFilter(filter)}` : ""}`).setLabel("Próxima").setStyle(ButtonStyle.Secondary).setDisabled(current >= pages - 1),
+    new ButtonBuilder().setCustomId(pageId("view", Math.max(0, current - 1), filter, "prev")).setLabel("◀ Anterior").setStyle(ButtonStyle.Secondary).setDisabled(current === 0),
+    new ButtonBuilder().setCustomId(pageId("view", Math.min(pages - 1, current + 1), filter, "next")).setLabel("Próxima ▶").setStyle(ButtonStyle.Secondary).setDisabled(current >= pages - 1),
     new ButtonBuilder().setCustomId("warehouse:search-items").setLabel("Buscar item").setEmoji("🔎").setStyle(ButtonStyle.Primary),
   );
   if (interaction.deferred || interaction.replied) await interaction.editReply({ embeds: [embed], components: [row] });
@@ -80,8 +104,8 @@ async function showHistory(interaction: ButtonInteraction, page: number, filter 
     .setDescription(view.length ? view.map((log) => `${log.action === "deposit" ? "➕ Guardou" : "➖ Retirou"} **${log.quantity}× ${log.itemName}**\n> ${log.displayName} • ${date(log.createdAt)}`).join("\n\n") : "Nenhuma movimentação encontrada.")
     .setFooter({ text: `${total} movimentação(ões) • ${current + 1}/${pages} páginas${filter ? ` • filtro: ${filter}` : ""}` });
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`warehouse:history:${Math.max(0, current - 1)}${filter ? `:${encodeFilter(filter)}` : ""}`).setLabel("Anterior").setStyle(ButtonStyle.Secondary).setDisabled(current === 0),
-    new ButtonBuilder().setCustomId(`warehouse:history:${Math.min(pages - 1, current + 1)}${filter ? `:${encodeFilter(filter)}` : ""}`).setLabel("Próxima").setStyle(ButtonStyle.Secondary).setDisabled(current >= pages - 1),
+    new ButtonBuilder().setCustomId(pageId("history", Math.max(0, current - 1), filter, "prev")).setLabel("◀ Anterior").setStyle(ButtonStyle.Secondary).setDisabled(current === 0),
+    new ButtonBuilder().setCustomId(pageId("history", Math.min(pages - 1, current + 1), filter, "next")).setLabel("Próxima ▶").setStyle(ButtonStyle.Secondary).setDisabled(current >= pages - 1),
     new ButtonBuilder().setCustomId("warehouse:filter").setLabel("Filtrar").setEmoji("🔎").setStyle(ButtonStyle.Primary),
   );
   if (interaction.deferred || interaction.replied) await interaction.editReply({ embeds: [embed], components: [row] });
@@ -114,12 +138,12 @@ export async function handleWarehouseButton(interaction: ButtonInteraction): Pro
   if (id.startsWith("warehouse:view:")) {
     const [, , rawPage, rawFilter] = id.split(":");
     await interaction.deferReply({ ephemeral: true });
-    await showItems(interaction, Number(rawPage), decodeFilter(rawFilter)); return true;
+    await showItems(interaction, Number(rawPage), rawFilter === "-" ? "" : decodeFilter(rawFilter)); return true;
   }
   if (id.startsWith("warehouse:history:")) {
     const [, , rawPage, rawFilter] = id.split(":");
     await interaction.deferReply({ ephemeral: true });
-    await showHistory(interaction, Number(rawPage), decodeFilter(rawFilter)); return true;
+    await showHistory(interaction, Number(rawPage), rawFilter === "-" ? "" : decodeFilter(rawFilter)); return true;
   }
   return false;
 }
