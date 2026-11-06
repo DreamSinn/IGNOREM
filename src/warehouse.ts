@@ -3,7 +3,7 @@ import {
   StringSelectMenuBuilder, TextInputBuilder, TextInputStyle, type ButtonInteraction, type ModalSubmitInteraction, type StringSelectMenuInteraction,
 } from "discord.js";
 import { getGuildConfig, saveGuildConfig } from "./db.js";
-import { changeWarehouseItem, consumePendingWithdrawal, countWarehouseHistory, countWarehouseItems, createPendingWithdrawal, deletePendingWithdrawal, listWarehouseHistory, listWarehouseItems, setPendingWithdrawalQuantity, WAREHOUSE_CAPACITY } from "./warehouse-db.js";
+import { changeWarehouseItem, consumePendingWithdrawal, countWarehouseHistory, countWarehouseItems, createPendingWithdrawal, deletePendingWithdrawal, depositWarehouseBatch, listWarehouseHistory, listWarehouseItems, setPendingWithdrawalQuantity, WAREHOUSE_CAPACITY } from "./warehouse-db.js";
 
 const GOLD = 0xc49a4a;
 const date = (d: Date) => new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short", timeZone: "America/Sao_Paulo" }).format(d);
@@ -78,6 +78,9 @@ export function warehousePanelComponents(): ActionRowBuilder<ButtonBuilder>[] {
       new ButtonBuilder().setCustomId("warehouse:withdraw").setLabel("Retirar item").setEmoji("➖").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId("warehouse:history:0").setLabel("Registro").setEmoji("📖").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId("warehouse:filter").setLabel("Filtrar registro").setEmoji("🔎").setStyle(ButtonStyle.Secondary),
+    ),
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId("warehouse:deposit-batch").setLabel("Guardar vários itens").setEmoji("📦").setStyle(ButtonStyle.Success),
     ),
   ];
 }
@@ -181,6 +184,14 @@ export async function handleWarehouseButton(interaction: ButtonInteraction): Pro
     );
     await interaction.showModal(modal); return true;
   }
+  if (id === "warehouse:deposit-batch") {
+    const modal = new ModalBuilder().setCustomId("warehouse:deposit-batch").setTitle("Guardar vários itens");
+    modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(
+      field("items", "Um item por linha: nome | quantidade", TextInputStyle.Paragraph, true, 4000)
+        .setPlaceholder("Poção de vida | 10\nPoção de mana | 5\nArco | 1\nFlecha | 100"),
+    ));
+    await interaction.showModal(modal); return true;
+  }
   if (id === "warehouse:withdraw") { await showWithdrawChoices(interaction, 0); return true; }
   if (id.startsWith("warehouse:withdraw-page:")) {
     const page = Number(id.split(":")[2]);
@@ -272,6 +283,30 @@ export async function handleWarehouseModal(interaction: ModalSubmitInteraction):
     config.texts.warehouseIconOverrides = JSON.stringify(overrides);
     await saveGuildConfig(config);
     await interaction.reply({ content: emoji ? `Ícone de **${itemName}** definido como ${emoji}.` : `Ícone personalizado de **${itemName}** removido; o bot voltará a sugerir automaticamente.`, ephemeral: true }); return true;
+  }
+  if (interaction.customId === "warehouse:deposit-batch") {
+    const lines = interaction.fields.getTextInputValue("items").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (!lines.length) { await interaction.reply({ content: "Digite pelo menos um item no formato **Nome do item | quantidade**.", ephemeral: true }); return true; }
+    if (lines.length > 40) { await interaction.reply({ content: "O limite é de 40 linhas de itens por envio.", ephemeral: true }); return true; }
+    const entries: Array<{ name: string; quantity: number }> = [];
+    for (const [index, line] of lines.entries()) {
+      const match = line.match(/^(.+?)\s*\|\s*(\d+)$/);
+      if (!match) { await interaction.reply({ content: `Linha ${index + 1} inválida: **${line}**. Use o formato **Nome do item | quantidade** (ex.: Poção de vida | 10).`, ephemeral: true }); return true; }
+      const name = match[1].trim();
+      const quantity = Number(match[2]);
+      if (!name || name.length > 100 || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > 1000000) {
+        await interaction.reply({ content: `Confira o nome e a quantidade da linha ${index + 1}; use quantidade de 1 a 1.000.000.`, ephemeral: true }); return true;
+      }
+      entries.push({ name, quantity });
+    }
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      const result = await depositWarehouseBatch({ guildId: interaction.guildId, items: entries, userId: interaction.user.id, displayName: interaction.user.globalName ?? interaction.user.username, operationId: interaction.id });
+      await refreshPublicPanel(interaction.guild, interaction.guildId);
+      const summary = entries.map((entry) => `• ${entry.name} — **${entry.quantity}**`).join("\n");
+      await interaction.editReply(`**${result.itemCount} tipo(s) de item guardado(s) com sucesso.**\n${summary}\n\nEspaços ocupados: **${result.slotsUsed}/${WAREHOUSE_CAPACITY}**.`);
+    } catch (error) { await interaction.editReply(error instanceof Error ? error.message : "Não foi possível guardar a lista."); }
+    return true;
   }
   if (interaction.customId === "warehouse:deposit") {
     const raw = interaction.fields.getTextInputValue("quantity").trim();

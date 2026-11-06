@@ -34,6 +34,8 @@ O Wherehouse é um baú compartilhado persistido no MySQL, com capacidade fixa d
 
 Cada nome de item ocupa um espaço, independentemente da quantidade. Ao guardar mais unidades com o mesmo nome, elas se somam à pilha existente. Nomes que diferem apenas por maiúsculas/minúsculas ou acentos são considerados o mesmo item. Para retirar, o usuário escolhe o item em uma lista, informa a quantidade e confirma; o bot valida o saldo e informa a quantidade restante. O espaço é liberado quando a pilha chega a zero. As quantidades são inteiras positivas.
 
+O botão **Guardar vários itens** aceita até 40 linhas no formato `Nome do item | quantidade`, por exemplo `Poção de vida | 10`. Nomes repetidos na mesma lista são somados. O bot valida o lote inteiro e grava tudo em uma única transação: se houver erro ou faltarem espaços, nada da lista é aplicado.
+
 O botão **Ver itens** abre um inventário visual de 20 espaços por página (até 12 páginas), permite buscar por nome e alternar a ordenação entre alfabética e quantidade. O bot sugere automaticamente um emoji de acordo com palavras reconhecidas no nome do item; nomes sem categoria reconhecida usam um ícone genérico. Administradores podem substituir/remover a sugestão pelo botão **Ícones dos itens** no painel administrativo. **Registro** exibe as movimentações paginadas, com filtros por item/usuário e atalhos para minhas movimentações, itens guardados ou retirados. Cada movimentação registra ação, nome do item, quantidade, usuário e data/hora. Operações repetidas com o mesmo ID de interação não são aplicadas duas vezes. O painel mostra quantos espaços estão ocupados. As tabelas do baú são criadas automaticamente na inicialização ou por `pnpm migrate`.
 
 ## Imagens

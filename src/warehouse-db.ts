@@ -163,3 +163,46 @@ export async function consumePendingWithdrawal(token: string, guildId: string, u
   } catch (error) { await conn.rollback(); throw error; }
   finally { conn.release(); }
 }
+
+export async function depositWarehouseBatch(input: { guildId: string; items: Array<{ name: string; quantity: number }>; userId: string; displayName: string; operationId: string }): Promise<{ slotsUsed: number; itemCount: number }> {
+  if (!input.items.length || input.items.length > 40) throw new Error("A lista deve conter de 1 a 40 itens diferentes.");
+  const normalized = new Map<string, { name: string; quantity: number }>();
+  for (const entry of input.items) {
+    const name = entry.name.trim().replace(/\s+/g, " ");
+    if (!name || name.length > 100) throw new Error("Cada nome de item deve ter entre 1 e 100 caracteres.");
+    if (!Number.isSafeInteger(entry.quantity) || entry.quantity < 1 || entry.quantity > 1000000) throw new Error(`Quantidade inválida para **${name}**.`);
+    const key = name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("pt-BR");
+    const prior = normalized.get(key);
+    if (prior) {
+      prior.quantity += entry.quantity;
+      if (!Number.isSafeInteger(prior.quantity) || prior.quantity > 1000000) throw new Error(`Quantidade total inválida para **${name}**.`);
+    } else normalized.set(key, { name, quantity: entry.quantity });
+  }
+
+  const conn = await getDatabasePool().getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.execute("INSERT INTO warehouse_operations (interaction_id) VALUES (?)", [input.operationId]);
+    await conn.execute("INSERT INTO warehouse_locks (guild_id) VALUES (?) ON DUPLICATE KEY UPDATE guild_id = VALUES(guild_id)", [input.guildId]);
+    await conn.execute("SELECT guild_id FROM warehouse_locks WHERE guild_id = ? FOR UPDATE", [input.guildId]);
+    const [existingRows] = await conn.execute<Row[]>("SELECT item_name, quantity FROM warehouse_items WHERE guild_id = ? FOR UPDATE", [input.guildId]);
+    const existing = new Map(existingRows.map((row) => [String(row.item_name).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("pt-BR"), Number(row.quantity)]));
+    const newSlots = [...normalized.keys()].filter((key) => !existing.has(key)).length;
+    if (existingRows.length + newSlots > WAREHOUSE_CAPACITY) throw new Error(`A lista ultrapassa o limite do baú. Há ${WAREHOUSE_CAPACITY - existingRows.length} espaço(s) livre(s), mas são necessários ${newSlots}.`);
+    for (const [key, entry] of normalized) {
+      const old = existing.get(key);
+      const total = (old ?? 0) + entry.quantity;
+      if (!Number.isSafeInteger(total)) throw new Error(`Quantidade total excede o limite para **${entry.name}**.`);
+      if (old === undefined) await conn.execute("INSERT INTO warehouse_items (guild_id, item_name, quantity) VALUES (?, ?, ?)", [input.guildId, entry.name, entry.quantity]);
+      else await conn.execute("UPDATE warehouse_items SET quantity = ? WHERE guild_id = ? AND item_name = ?", [total, input.guildId, entry.name]);
+      await conn.execute("INSERT INTO warehouse_history (guild_id, action, item_name, quantity, user_id, display_name) VALUES (?, 'deposit', ?, ?, ?, ?)", [input.guildId, entry.name, entry.quantity, input.userId, input.displayName.slice(0, 150)]);
+    }
+    const [countRows] = await conn.execute<Row[]>("SELECT COUNT(*) AS total FROM warehouse_items WHERE guild_id = ?", [input.guildId]);
+    await conn.commit();
+    return { slotsUsed: Number(countRows[0]?.total ?? 0), itemCount: normalized.size };
+  } catch (error) {
+    await conn.rollback();
+    if ((error as { code?: string }).code === "ER_DUP_ENTRY") throw new Error("Esta interação já foi processada; nenhum item duplicado foi guardado.");
+    throw error;
+  } finally { conn.release(); }
+}
