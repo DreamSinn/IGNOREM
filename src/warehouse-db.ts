@@ -1,4 +1,5 @@
-import mysql, { type RowDataPacket } from "mysql2/promise";
+import { randomBytes } from "node:crypto";
+import type { RowDataPacket } from "mysql2/promise";
 import { getDatabasePool } from "./db.js";
 
 export const WAREHOUSE_CAPACITY = 240;
@@ -33,10 +34,24 @@ export async function ensureWarehouseSchema(): Promise<void> {
     KEY idx_warehouse_history_item (guild_id, item_name), KEY idx_warehouse_history_user (guild_id, user_id),
     CONSTRAINT chk_warehouse_action CHECK (action IN ('deposit', 'withdraw'))
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS warehouse_operations (
+    interaction_id VARCHAR(32) NOT NULL PRIMARY KEY,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS warehouse_pending_withdrawals (
+    token CHAR(16) NOT NULL PRIMARY KEY,
+    guild_id VARCHAR(32) NOT NULL,
+    user_id VARCHAR(32) NOT NULL,
+    item_name VARCHAR(100) NOT NULL,
+    quantity BIGINT UNSIGNED NOT NULL,
+    expires_at DATETIME NOT NULL,
+    KEY idx_warehouse_pending_expires (expires_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
 }
 
-export async function listWarehouseItems(guildId: string): Promise<WarehouseItem[]> {
-  const [rows] = await getDatabasePool().execute<Row[]>("SELECT id, item_name, quantity, updated_at FROM warehouse_items WHERE guild_id = ? ORDER BY item_name ASC", [guildId]);
+export async function listWarehouseItems(guildId: string, sort: "name" | "quantity" = "name"): Promise<WarehouseItem[]> {
+  const order = sort === "quantity" ? "quantity DESC, item_name ASC" : "item_name ASC";
+  const [rows] = await getDatabasePool().execute<Row[]>(`SELECT id, item_name, quantity, updated_at FROM warehouse_items WHERE guild_id = ? ORDER BY ${order}`, [guildId]);
   return rows.map((r) => ({ id: Number(r.id), name: String(r.item_name), quantity: Number(r.quantity), updatedAt: new Date(String(r.updated_at)) }));
 }
 
@@ -45,7 +60,7 @@ export async function countWarehouseItems(guildId: string): Promise<number> {
   return Number(rows[0]?.total ?? 0);
 }
 
-export async function changeWarehouseItem(input: { guildId: string; action: "deposit" | "withdraw"; name: string; quantity: number; userId: string; displayName: string }): Promise<{ slotsUsed: number; quantity: number }> {
+export async function changeWarehouseItem(input: { guildId: string; action: "deposit" | "withdraw"; name: string; quantity: number; userId: string; displayName: string; operationId: string }): Promise<{ slotsUsed: number; quantity: number }> {
   const name = input.name.trim().replace(/\s+/g, " ");
   if (!name || name.length > 100) throw new Error("O nome do item deve ter entre 1 e 100 caracteres.");
   if (!Number.isSafeInteger(input.quantity) || input.quantity < 1 || input.quantity > 1000000) throw new Error("A quantidade deve ser um número inteiro entre 1 e 1.000.000.");
@@ -53,6 +68,7 @@ export async function changeWarehouseItem(input: { guildId: string; action: "dep
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
+    await conn.execute("INSERT INTO warehouse_operations (interaction_id) VALUES (?)", [input.operationId]);
     await conn.execute("INSERT INTO warehouse_locks (guild_id) VALUES (?) ON DUPLICATE KEY UPDATE guild_id = VALUES(guild_id)", [input.guildId]);
     await conn.execute("SELECT guild_id FROM warehouse_locks WHERE guild_id = ? FOR UPDATE", [input.guildId]);
     const [rows] = await conn.execute<Row[]>("SELECT id, item_name, quantity FROM warehouse_items WHERE guild_id = ? AND item_name = ? FOR UPDATE", [input.guildId, name]);
@@ -82,23 +98,68 @@ export async function changeWarehouseItem(input: { guildId: string; action: "dep
     return { slotsUsed: Number(cnt[0]?.total ?? 0), quantity: Number(qty[0]?.quantity ?? 0) };
   } catch (error) {
     await conn.rollback();
+    if ((error as { code?: string }).code === "ER_DUP_ENTRY") throw new Error("Esta interação já foi processada; nenhuma movimentação duplicada foi registrada.");
     throw error;
   } finally { conn.release(); }
 }
 
+function historyFilter(filter: string): { query: string; action: string; userId: string } {
+  const value = filter.trim();
+  if (value.startsWith("action:")) return { query: "", action: value.slice(7), userId: "" };
+  if (value.startsWith("user:")) return { query: "", action: "", userId: value.slice(5) };
+  return { query: value, action: "", userId: "" };
+}
+
 export async function countWarehouseHistory(guildId: string, filter = ""): Promise<number> {
-  const search = `%${filter.trim()}%`;
+  const parsed = historyFilter(filter);
+  const search = `%${parsed.query}%`;
   const [rows] = await getDatabasePool().execute<Row[]>(`SELECT COUNT(*) AS total FROM warehouse_history
-    WHERE guild_id = ? AND (? = '' OR item_name LIKE ? OR display_name LIKE ? OR user_id LIKE ?)`, [guildId, filter.trim(), search, search, search]);
+    WHERE guild_id = ? AND (? = '' OR item_name LIKE ? OR display_name LIKE ? OR user_id LIKE ?)
+    AND (? = '' OR action = ?) AND (? = '' OR user_id = ?)`, [guildId, parsed.query, search, search, search, parsed.action, parsed.action, parsed.userId, parsed.userId]);
   return Number(rows[0]?.total ?? 0);
 }
 
 export async function listWarehouseHistory(guildId: string, filter = "", limit = 10, offset = 0): Promise<WarehouseLog[]> {
-  const search = `%${filter.trim()}%`;
+  const parsed = historyFilter(filter);
+  const search = `%${parsed.query}%`;
   const safeLimit = Math.min(Math.max(Math.trunc(limit), 1), 100);
   const safeOffset = Math.max(Math.trunc(offset), 0);
   const [rows] = await getDatabasePool().execute<Row[]>(`SELECT id, action, item_name, quantity, user_id, display_name, created_at
     FROM warehouse_history WHERE guild_id = ? AND (? = '' OR item_name LIKE ? OR display_name LIKE ? OR user_id LIKE ?)
-    ORDER BY created_at DESC, id DESC LIMIT ${safeLimit} OFFSET ${safeOffset}`, [guildId, filter.trim(), search, search, search]);
+    AND (? = '' OR action = ?) AND (? = '' OR user_id = ?)
+    ORDER BY created_at DESC, id DESC LIMIT ${safeLimit} OFFSET ${safeOffset}`, [guildId, parsed.query, search, search, search, parsed.action, parsed.action, parsed.userId, parsed.userId]);
   return rows.map((r) => ({ id: Number(r.id), action: String(r.action) as WarehouseLog["action"], itemName: String(r.item_name), quantity: Number(r.quantity), userId: String(r.user_id), displayName: String(r.display_name), createdAt: new Date(String(r.created_at)) }));
+}
+
+export async function createPendingWithdrawal(input: { guildId: string; userId: string; itemName: string; quantity: number }): Promise<string> {
+  if (!Number.isSafeInteger(input.quantity) || input.quantity < 0 || input.quantity > 1000000) throw new Error("A quantidade deve ser um número inteiro entre 0 e 1.000.000.");
+  const token = randomBytes(8).toString("hex");
+  await getDatabasePool().execute("DELETE FROM warehouse_pending_withdrawals WHERE expires_at < UTC_TIMESTAMP()");
+  await getDatabasePool().execute("INSERT INTO warehouse_pending_withdrawals (token, guild_id, user_id, item_name, quantity, expires_at) VALUES (?, ?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 5 MINUTE))", [token, input.guildId, input.userId, input.itemName, input.quantity]);
+  return token;
+}
+
+export async function setPendingWithdrawalQuantity(token: string, guildId: string, userId: string, quantity: number): Promise<string | null> {
+  if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 1000000) throw new Error("A quantidade deve ser um número inteiro entre 1 e 1.000.000.");
+  const [rows] = await getDatabasePool().execute<Row[]>("SELECT item_name FROM warehouse_pending_withdrawals WHERE token = ? AND guild_id = ? AND user_id = ? AND expires_at > UTC_TIMESTAMP()", [token, guildId, userId]);
+  if (!rows[0]) return null;
+  const [result] = await getDatabasePool().execute("UPDATE warehouse_pending_withdrawals SET quantity = ? WHERE token = ? AND guild_id = ? AND user_id = ? AND expires_at > UTC_TIMESTAMP()", [quantity, token, guildId, userId]);
+  return (result as { affectedRows: number }).affectedRows === 1 ? String(rows[0].item_name) : null;
+}
+
+export async function deletePendingWithdrawal(token: string, guildId: string, userId: string): Promise<void> {
+  await getDatabasePool().execute("DELETE FROM warehouse_pending_withdrawals WHERE token = ? AND guild_id = ? AND user_id = ?", [token, guildId, userId]);
+}
+
+export async function consumePendingWithdrawal(token: string, guildId: string, userId: string): Promise<{ itemName: string; quantity: number } | null> {
+  const conn = await getDatabasePool().getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.execute<Row[]>("SELECT item_name, quantity FROM warehouse_pending_withdrawals WHERE token = ? AND guild_id = ? AND user_id = ? AND expires_at > UTC_TIMESTAMP() FOR UPDATE", [token, guildId, userId]);
+    if (!rows[0]) { await conn.rollback(); return null; }
+    await conn.execute("DELETE FROM warehouse_pending_withdrawals WHERE token = ?", [token]);
+    await conn.commit();
+    return { itemName: String(rows[0].item_name), quantity: Number(rows[0].quantity) };
+  } catch (error) { await conn.rollback(); throw error; }
+  finally { conn.release(); }
 }

@@ -55,7 +55,7 @@ import {
   type GuildConfig,
 } from "./db.js";
 import { EMBED_IMAGE_SLOTS, PROFILE_IMAGE_SLOTS, checkImageUrl, imageBytes, imageKeyForStatus, imageUrl, isHttpsUrl } from "./assets.js";
-import { handleWarehouseButton, handleWarehouseModal, warehouseAdminButton } from "./warehouse.js";
+import { handleWarehouseButton, handleWarehouseModal, handleWarehouseSelect, warehouseAdminButton, warehouseIconAdminButton } from "./warehouse.js";
 
 const COLORS = {
   midnight: 0x111827,
@@ -241,6 +241,7 @@ function panelComponents(): ActionRowBuilder<ButtonBuilder>[] {
       new ButtonBuilder().setCustomId("panel:new-contract").setLabel("Novo contrato").setEmoji(ICONS.scroll).setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId("panel:contracts").setLabel("Quadro de missões").setEmoji(ICONS.sword).setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId("panel:payments").setLabel("Livro-caixa").setEmoji(ICONS.coin).setStyle(ButtonStyle.Secondary),
+      warehouseIconAdminButton(),
     ),
     new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId("panel:structure").setLabel("Sincronizar estrutura").setEmoji(ICONS.hammer).setStyle(ButtonStyle.Secondary),
@@ -845,7 +846,7 @@ async function clearCurrentChannel(interaction: ModalSubmitInteraction): Promise
 async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown> {
   if (!interaction.guild) return interaction.reply({ content: "Esta ação só pode ser usada dentro de um servidor.", ephemeral: true });
   if (interaction.customId.startsWith("warehouse:")) {
-    if (interaction.customId === "warehouse:configure" && !(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem configurar o Wherehouse.", ephemeral: true });
+    if (["warehouse:configure", "warehouse:icons"].includes(interaction.customId) && !(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem configurar o Wherehouse.", ephemeral: true });
     if (await handleWarehouseModal(interaction)) return;
   }
   if (interaction.customId === "maintenance:clear") {
@@ -971,7 +972,7 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown
 
 async function handleButton(interaction: ButtonInteraction): Promise<unknown> {
   if (interaction.customId.startsWith("warehouse:")) {
-    if (interaction.customId === "warehouse:configure" && !(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem configurar o Wherehouse.", ephemeral: true });
+    if (["warehouse:configure", "warehouse:icons"].includes(interaction.customId) && !(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem configurar o Wherehouse.", ephemeral: true });
     if (await handleWarehouseButton(interaction)) return;
   }
   if (interaction.customId === "panel:structure") {
@@ -1108,6 +1109,9 @@ async function handleButton(interaction: ButtonInteraction): Promise<unknown> {
 }
 
 async function handleSelect(interaction: StringSelectMenuInteraction | UserSelectMenuInteraction): Promise<unknown> {
+  if (interaction.isStringSelectMenu() && interaction.customId === "warehouse:withdraw-select") {
+    if (await handleWarehouseSelect(interaction)) return;
+  }
   if (interaction.isStringSelectMenu() && interaction.customId === "contracts:status") {
     if (!(await canManage(interaction))) return interaction.reply({ content: "Apenas gerentes e administradores podem consultar contratos.", ephemeral: true });
     return showContractList(interaction, interaction.values[0]);

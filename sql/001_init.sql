@@ -153,3 +153,18 @@ CREATE TABLE IF NOT EXISTS warehouse_history (
   KEY idx_warehouse_history_user (guild_id, user_id),
   CONSTRAINT chk_warehouse_action CHECK (action IN ('deposit', 'withdraw'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS warehouse_operations (
+  interaction_id VARCHAR(32) NOT NULL PRIMARY KEY,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS warehouse_pending_withdrawals (
+  token CHAR(16) NOT NULL PRIMARY KEY,
+  guild_id VARCHAR(32) NOT NULL,
+  user_id VARCHAR(32) NOT NULL,
+  item_name VARCHAR(100) NOT NULL,
+  quantity BIGINT UNSIGNED NOT NULL,
+  expires_at DATETIME NOT NULL,
+  KEY idx_warehouse_pending_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
