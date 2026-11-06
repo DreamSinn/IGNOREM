@@ -143,6 +143,10 @@ function getPool(): Pool {
   return pool;
 }
 
+export function getDatabasePool(): Pool {
+  return getPool();
+}
+
 const defaultTexts: Record<string, string> = {
   panelTitle: "Painel da Companhia",
   panelDescription: "Administração da estrutura, contratos e pagamentos em septims.",

@@ -122,3 +122,34 @@ CREATE TABLE IF NOT EXISTS guild_ledger (
   CONSTRAINT chk_guild_ledger_amount CHECK (amount > 0),
   CONSTRAINT fk_guild_ledger_contract FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS warehouse_locks (
+  guild_id VARCHAR(32) NOT NULL PRIMARY KEY
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS warehouse_items (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  guild_id VARCHAR(32) NOT NULL,
+  item_name VARCHAR(100) NOT NULL,
+  quantity BIGINT UNSIGNED NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_warehouse_item (guild_id, item_name),
+  KEY idx_warehouse_item_name (guild_id, item_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS warehouse_history (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  guild_id VARCHAR(32) NOT NULL,
+  action VARCHAR(16) NOT NULL,
+  item_name VARCHAR(100) NOT NULL,
+  quantity BIGINT UNSIGNED NOT NULL,
+  user_id VARCHAR(32) NOT NULL,
+  display_name VARCHAR(150) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_warehouse_history (guild_id, created_at),
+  KEY idx_warehouse_history_item (guild_id, item_name),
+  KEY idx_warehouse_history_user (guild_id, user_id),
+  CONSTRAINT chk_warehouse_action CHECK (action IN ('deposit', 'withdraw'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import { ASSET_DIR, assetMimeType } from "./assets.js";
 import { closeDatabase, ensureSchema } from "./db.js";
+import { ensureWarehouseSchema } from "./warehouse-db.js";
 import { startDiscord } from "./discord.js";
 
 const port = Number(process.env.PORT ?? 3000);
@@ -50,6 +51,7 @@ async function main(): Promise<void> {
 
   try {
     await ensureSchema();
+    await ensureWarehouseSchema();
     databaseReady = true;
     discordClient = await startDiscord();
   } catch (error) {

@@ -26,6 +26,15 @@ Se você está atualizando uma instalação anterior, o bot move os canais exist
 - `/meus-contratos`: lista as missões em que você participa. Disponível para todos.
 - `/identidade`: aplica as imagens de perfil (avatar e banner do bot, foto e banner do servidor) configuradas no painel. Administradores.
 - `/pagamentos`: livro-caixa com os pagamentos lançados (gerentes e administradores).
+- O botão **Configurar Wherehouse**, no painel administrativo, define o canal público pelo ID e publica/atualiza o painel do baú.
+
+## Wherehouse da Guilda
+
+O Wherehouse é um baú compartilhado persistido no MySQL, com capacidade fixa de **240 espaços**. Qualquer membro pode consultar o conteúdo, guardar itens, retirar itens e visualizar o registro. O administrador configura o canal no painel privado usando o ID do canal; o bot publica nesse canal o painel público com botões e formulários.
+
+Cada nome de item ocupa um espaço, independentemente da quantidade. Ao guardar mais unidades com o mesmo nome, elas se somam à pilha existente. Ao retirar, o bot valida o saldo disponível e remove o espaço quando a quantidade chega a zero. As quantidades são inteiras positivas.
+
+O botão **Ver itens** mostra o conteúdo em páginas e permite buscar por nome. **Registro** exibe as movimentações mais recentes; **Filtrar registro** permite pesquisar por nome do item, nome do usuário ou ID. Cada movimentação registra ação, nome do item, quantidade, usuário e data/hora. O painel mostra quantos espaços estão ocupados. As tabelas do baú são criadas automaticamente na inicialização ou por `pnpm migrate`.
 
 ## Imagens
 
@@ -108,3 +117,4 @@ O banco é a fonte durável dos dados. Não use o filesystem do container para g
 - Se o registro de um contrato for salvo no banco e uma etapa posterior falhar no Discord, o bot informa o código e pede que não recrie o contrato. Não há reconciliação automática nesse caso.
 - O bot depende das permissões do cargo para apagar as próprias mensagens na troca de canal (Contratos para Arquivo). Se faltar a permissão, o bot mantém o cartão original atualizado e avisa.
 - Não há suíte de testes automatizados. A validação atual é a compilação (`pnpm typecheck`) e testes manuais em um servidor de teste.
+- O Wherehouse tem capacidade fixa de 240 tipos de item por servidor; o histórico é persistente e consultável pelo painel, sem ferramenta de exclusão/edição de registros.

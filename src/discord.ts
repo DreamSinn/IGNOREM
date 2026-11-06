@@ -55,6 +55,7 @@ import {
   type GuildConfig,
 } from "./db.js";
 import { EMBED_IMAGE_SLOTS, PROFILE_IMAGE_SLOTS, checkImageUrl, imageBytes, imageKeyForStatus, imageUrl, isHttpsUrl } from "./assets.js";
+import { handleWarehouseButton, handleWarehouseModal, warehouseAdminButton } from "./warehouse.js";
 
 const COLORS = {
   midnight: 0x111827,
@@ -251,6 +252,7 @@ function panelComponents(): ActionRowBuilder<ButtonBuilder>[] {
       new ButtonBuilder().setCustomId("panel:clear-chat").setLabel("Limpar chat atual").setEmoji("🧹").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId("panel:images-embeds").setLabel("Imagens dos cartões").setEmoji("🖼️").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId("panel:images-profile").setLabel("Imagens de perfil").setEmoji("🪪").setStyle(ButtonStyle.Secondary),
+      warehouseAdminButton(),
     ),
   ];
 }
@@ -842,6 +844,10 @@ async function clearCurrentChannel(interaction: ModalSubmitInteraction): Promise
 
 async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown> {
   if (!interaction.guild) return interaction.reply({ content: "Esta ação só pode ser usada dentro de um servidor.", ephemeral: true });
+  if (interaction.customId.startsWith("warehouse:")) {
+    if (interaction.customId === "warehouse:configure" && !(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem configurar o Wherehouse.", ephemeral: true });
+    if (await handleWarehouseModal(interaction)) return;
+  }
   if (interaction.customId === "maintenance:clear") {
     if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem limpar mensagens.", ephemeral: true });
     return clearCurrentChannel(interaction);
@@ -964,6 +970,10 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<unknown
 }
 
 async function handleButton(interaction: ButtonInteraction): Promise<unknown> {
+  if (interaction.customId.startsWith("warehouse:")) {
+    if (interaction.customId === "warehouse:configure" && !(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem configurar o Wherehouse.", ephemeral: true });
+    if (await handleWarehouseButton(interaction)) return;
+  }
   if (interaction.customId === "panel:structure") {
     if (!(await canAdmin(interaction))) return interaction.reply({ content: "Apenas administradores autorizados podem criar a estrutura.", ephemeral: true });
     await interaction.deferReply({ ephemeral: true });
