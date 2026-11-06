@@ -100,8 +100,13 @@ async function refreshPublicPanel(guild: ButtonInteraction["guild"] | ModalSubmi
   if (messageId) {
     const oldMessage = await channel.messages.fetch(messageId).catch(() => null);
     if (oldMessage) {
-      await oldMessage.edit({ embeds: [embed], components: warehousePanelComponents() });
-      return;
+      try {
+        await oldMessage.edit({ embeds: [embed], components: warehousePanelComponents() });
+        return;
+      } catch (error) {
+        if ((error as { code?: number }).code !== 10008) throw error;
+        // O ID estava salvo, mas a mensagem foi apagada; publica um painel novo abaixo.
+      }
     }
   }
   const sent = await channel.send({ embeds: [embed], components: warehousePanelComponents() });
