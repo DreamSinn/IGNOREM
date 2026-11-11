@@ -1277,6 +1277,31 @@ export function attachDiscordHandlers(client: Client): void {
   });
 }
 
+async function probeDiscord(token: string): Promise<void> {
+  const checks: Array<[string, string, Record<string, string>]> = [
+    ["API pública (/gateway)", "https://discord.com/api/v10/gateway", {}],
+    ["API com token (/users/@me)", "https://discord.com/api/v10/users/@me", { authorization: `Bot ${token}` }],
+  ];
+  for (const [label, url, headers] of checks) {
+    const started = Date.now();
+    try {
+      const response = await fetch(url, { headers, signal: AbortSignal.timeout(15000) });
+      const body = (await response.text()).replace(/\s+/g, " ").slice(0, 160);
+      const note = response.status === 429 || /cloudflare|1015|banned/i.test(body) ? "  <-- IP BLOQUEADO/LIMITADO pelo Discord" : "";
+      console.log(`[discord:probe] ${label}: HTTP ${response.status} em ${Date.now() - started}ms. Retry-After=${response.headers.get("retry-after") ?? "-"}. ${body}${note}`);
+    } catch (error) {
+      console.error(`[discord:probe] ${label}: FALHOU após ${Date.now() - started}ms:`, (error as Error).message);
+    }
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} excedeu ${ms}ms`)), ms);
+    promise.then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
+  });
+}
+
 export async function startDiscord(): Promise<Client | null> {
   const token = process.env.DISCORD_TOKEN?.trim().replace(/^["']|["']$/g, "");
   if (!token) {
@@ -1284,43 +1309,42 @@ export async function startDiscord(): Promise<Client | null> {
     return null;
   }
   console.log(`[discord] Token encontrado (${token.length} caracteres). Iniciando login...`);
-  const client = new Client({ intents: ["Guilds"] });
-  attachDiscordHandlers(client);
-  client.on(Events.Error, (error) => console.error("[discord] Erro do cliente:", error));
-  client.on(Events.Warn, (message) => console.warn("[discord] Aviso:", message));
-  client.on(Events.ShardError, (error) => console.error("[discord] Erro de shard/websocket:", error));
-  client.on(Events.ShardDisconnect, (event, id) => console.warn(`[discord] Shard ${id} desconectou (código ${event.code}).`));
-  client.on(Events.Invalidated, () => console.error("[discord] Sessão invalidada (token inválido/revogado?)."));
-  client.on(Events.Debug, (message) => {
-    // Mostra só o essencial do handshake para não poluir o log.
-    if (/Provided token|Preparing to connect|Connecting to|Session|Ready|READY|Hello|identify|Heartbeat.*ack|429|rate/i.test(message)) {
-      console.log(`[discord:debug] ${message.replace(token, "***")}`);
-    }
-  });
-  client.rest.on("rateLimited", (info) => console.warn(`[discord] Rate limit em ${info.method} ${info.route}; aguardando ${info.timeToReset}ms`));
-  client.once(Events.ClientReady, async (readyClient) => {
-    console.log(`Discord conectado como ${readyClient.user.tag}`);
+  await probeDiscord(token);
+  for (let attempt = 1; ; attempt++) {
+    const client = new Client({ intents: ["Guilds"], rest: { timeout: 20000, retries: 1 } });
+    attachDiscordHandlers(client);
+    client.on(Events.Error, (error) => console.error("[discord] Erro do cliente:", error));
+    client.on(Events.Warn, (message) => console.warn("[discord] Aviso:", message));
+    client.on(Events.ShardError, (error) => console.error("[discord] Erro de shard/websocket:", error));
+    client.on(Events.ShardDisconnect, (event, id) => console.warn(`[discord] Shard ${id} desconectou (código ${event.code}).`));
+    client.on(Events.Invalidated, () => console.error("[discord] Sessão invalidada (token inválido/revogado?)."));
+    client.on(Events.Debug, (message) => {
+      if (/Provided token|Preparing to connect|Connecting to|Session|Ready|READY|Hello|identify|Heartbeat.*ack|429|rate/i.test(message)) {
+        console.log(`[discord:debug] ${message.replace(token, "***")}`);
+      }
+    });
+    client.rest.on("rateLimited", (info) => console.warn(`[discord] Rate limit em ${info.method} ${info.route}; aguardando ${info.timeToReset}ms`));
+    client.once(Events.ClientReady, async (readyClient) => {
+      console.log(`Discord conectado como ${readyClient.user.tag}`);
+      try {
+        await registerDiscord(readyClient);
+        console.log("Comando /painel registrado.");
+      } catch (error) {
+        console.error("Não foi possível registrar comandos Discord", error);
+      }
+    });
     try {
-      await registerDiscord(readyClient);
-      console.log("Comando /painel registrado.");
+      console.log(`[discord] Login, tentativa ${attempt}...`);
+      await withTimeout(client.login(token), 60000, "client.login");
+      return client;
     } catch (error) {
-      console.error("Não foi possível registrar comandos Discord", error);
+      console.error(`[discord] Login falhou (tentativa ${attempt}):`, (error as Error).message);
+      client.destroy();
+      if (/TokenInvalid|invalid token|DisallowedIntents/i.test(String((error as { code?: string }).code ?? error))) throw error;
+      const wait = Math.min(300000, attempt * 30000);
+      console.log(`[discord] Nova tentativa em ${wait / 1000}s...`);
+      await new Promise((resolve) => setTimeout(resolve, wait));
+      if (attempt % 3 === 0) await probeDiscord(token);
     }
-  });
-  const watchdog = setTimeout(() => {
-    console.error(
-      "[discord] O login está demorando mais de 45s. Causas comuns: (1) DISCORD_TOKEN no Render ainda é o antigo/está errado; " +
-        "(2) o IP do Render foi bloqueado pelo Cloudflare do Discord (erro 429/1015) — faça 'Manual Deploy > Clear build cache & deploy' para trocar de IP; " +
-        "(3) falta de rede de saída.",
-    );
-  }, 45000);
-  try {
-    await client.login(token);
-  } catch (error) {
-    console.error("[discord] Falha no login:", error);
-    throw error;
-  } finally {
-    clearTimeout(watchdog);
   }
-  return client;
 }
