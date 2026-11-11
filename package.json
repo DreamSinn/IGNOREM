@@ -3,7 +3,7 @@
   "version": "0.4.0",
   "private": true,
   "description": "Discord bot for the Companhia da Lua de Ferro, a Skyrim RP mercenary guild.",
-  "packageManager": "pnpm@12.18.0",
+  "packageManager": "pnpm@10.15.0",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
