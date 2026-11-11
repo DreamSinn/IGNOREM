@@ -49,13 +49,31 @@ async function main(): Promise<void> {
     console.warn("PUBLIC_BASE_URL não configurada; os embeds serão exibidos sem imagem.");
   }
 
+  // Banco e Discord iniciam de forma independente: um problema no MySQL não impede mais o bot de conectar.
+  void initDatabase();
   try {
-    await ensureSchema();
-    await ensureWarehouseSchema();
-    databaseReady = true;
     discordClient = await startDiscord();
   } catch (error) {
-    console.error("Falha ao inicializar dependências do serviço", error);
+    console.error("Falha ao conectar no Discord", error);
+  }
+}
+
+async function initDatabase(): Promise<void> {
+  for (let attempt = 1; !databaseReady; attempt++) {
+    try {
+      console.log(`[db] Conectando ao MySQL (tentativa ${attempt})...`);
+      await ensureSchema();
+      await ensureWarehouseSchema();
+      databaseReady = true;
+      console.log("[db] Banco pronto.");
+    } catch (error) {
+      const e = error as { code?: string; message?: string };
+      console.error(`[db] Falha ao preparar o banco (${e.code ?? "sem código"}): ${e.message ?? error}`);
+      if (/certificate|SSL|TLS/i.test(`${e.code} ${e.message}`)) {
+        console.error("[db] Dica: o certificado do MySQL não foi aceito. Defina DATABASE_SSL=insecure (ou DATABASE_CA_PATH com a CA do banco).");
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(60000, attempt * 10000)));
+    }
   }
 }
 
@@ -69,6 +87,9 @@ async function shutdown(signal: string): Promise<void> {
 
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));
+
+process.on("unhandledRejection", (reason) => console.error("unhandledRejection:", reason));
+process.on("uncaughtException", (error) => console.error("uncaughtException:", error));
 
 main().catch((error) => {
   console.error("Falha ao iniciar o bot", error);

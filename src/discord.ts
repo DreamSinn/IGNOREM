@@ -1278,13 +1278,26 @@ export function attachDiscordHandlers(client: Client): void {
 }
 
 export async function startDiscord(): Promise<Client | null> {
-  const token = process.env.DISCORD_TOKEN;
+  const token = process.env.DISCORD_TOKEN?.trim().replace(/^["']|["']$/g, "");
   if (!token) {
     console.warn("DISCORD_TOKEN não configurado; o servidor de saúde continuará ativo, mas o bot não conectará.");
     return null;
   }
+  console.log(`[discord] Token encontrado (${token.length} caracteres). Iniciando login...`);
   const client = new Client({ intents: ["Guilds"] });
   attachDiscordHandlers(client);
+  client.on(Events.Error, (error) => console.error("[discord] Erro do cliente:", error));
+  client.on(Events.Warn, (message) => console.warn("[discord] Aviso:", message));
+  client.on(Events.ShardError, (error) => console.error("[discord] Erro de shard/websocket:", error));
+  client.on(Events.ShardDisconnect, (event, id) => console.warn(`[discord] Shard ${id} desconectou (código ${event.code}).`));
+  client.on(Events.Invalidated, () => console.error("[discord] Sessão invalidada (token inválido/revogado?)."));
+  client.on(Events.Debug, (message) => {
+    // Mostra só o essencial do handshake para não poluir o log.
+    if (/Provided token|Preparing to connect|Connecting to|Session|Ready|READY|Hello|identify|Heartbeat.*ack|429|rate/i.test(message)) {
+      console.log(`[discord:debug] ${message.replace(token, "***")}`);
+    }
+  });
+  client.rest.on("rateLimited", (info) => console.warn(`[discord] Rate limit em ${info.method} ${info.route}; aguardando ${info.timeToReset}ms`));
   client.once(Events.ClientReady, async (readyClient) => {
     console.log(`Discord conectado como ${readyClient.user.tag}`);
     try {
@@ -1294,6 +1307,20 @@ export async function startDiscord(): Promise<Client | null> {
       console.error("Não foi possível registrar comandos Discord", error);
     }
   });
-  await client.login(token);
+  const watchdog = setTimeout(() => {
+    console.error(
+      "[discord] O login está demorando mais de 45s. Causas comuns: (1) DISCORD_TOKEN no Render ainda é o antigo/está errado; " +
+        "(2) o IP do Render foi bloqueado pelo Cloudflare do Discord (erro 429/1015) — faça 'Manual Deploy > Clear build cache & deploy' para trocar de IP; " +
+        "(3) falta de rede de saída.",
+    );
+  }, 45000);
+  try {
+    await client.login(token);
+  } catch (error) {
+    console.error("[discord] Falha no login:", error);
+    throw error;
+  } finally {
+    clearTimeout(watchdog);
+  }
   return client;
 }

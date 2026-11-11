@@ -126,6 +126,17 @@ function getPool(): Pool {
   if (!url) throw new Error("DATABASE_URL não configurada.");
   const parsed = new URL(url);
   const caPath = process.env.DATABASE_CA_PATH;
+  // DATABASE_SSL: "false" desliga TLS; "insecure" usa TLS sem validar o certificado
+  // (bancos gerenciados com certificado próprio); qualquer outro valor = validação estrita.
+  const sslMode = (process.env.DATABASE_SSL ?? "").toLowerCase();
+  const ssl =
+    sslMode === "false" || sslMode === "off" || sslMode === "0"
+      ? undefined
+      : sslMode === "insecure"
+        ? { rejectUnauthorized: false }
+        : caPath
+          ? { ca: readFileSync(caPath), rejectUnauthorized: true }
+          : { rejectUnauthorized: true };
   pool = mysql.createPool({
     host: parsed.hostname,
     port: Number(parsed.port || 3306),
@@ -135,10 +146,9 @@ function getPool(): Pool {
     connectionLimit: 5,
     waitForConnections: true,
     queueLimit: 0,
+    connectTimeout: 15000,
     timezone: "Z",
-    ssl: caPath
-      ? { ca: readFileSync(caPath), rejectUnauthorized: true }
-      : { rejectUnauthorized: true },
+    ssl,
   });
   return pool;
 }
